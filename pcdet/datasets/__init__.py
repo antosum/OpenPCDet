@@ -8,12 +8,20 @@ from pcdet.utils import common_utils
 from .dataset import DatasetTemplate
 from .kitti.kitti_dataset import KittiDataset
 from .nuscenes.nuscenes_dataset import NuScenesDataset
-from .waymo.waymo_dataset import WaymoDataset
 from .pandaset.pandaset_dataset import PandasetDataset
 from .lyft.lyft_dataset import LyftDataset
 from .once.once_dataset import ONCEDataset
-from .argo2.argo2_dataset import Argo2Dataset
 from .custom.custom_dataset import CustomDataset
+
+try:
+    from .argo2.argo2_dataset import Argo2Dataset
+except Exception:
+    Argo2Dataset = None
+
+try:
+    from .waymo.waymo_dataset import WaymoDataset
+except Exception:
+    WaymoDataset = None
 
 __all__ = {
     'DatasetTemplate': DatasetTemplate,

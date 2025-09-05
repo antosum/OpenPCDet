@@ -66,6 +66,10 @@ class CustomDataset(DatasetTemplate):
         lidar_file = self.root_path / 'points' / ('%s.npy' % idx)
         assert lidar_file.exists()
         point_features = np.load(lidar_file)
+        # Pad a zero "timestamp" column if points are 4D (N,4)
+        if point_features.ndim == 2 and point_features.shape[1] == 4:
+            zeros = np.zeros((point_features.shape[0], 1), dtype=point_features.dtype)
+            point_features = np.concatenate([point_features, zeros], axis=1)
         return point_features
 
     def set_split(self, split):

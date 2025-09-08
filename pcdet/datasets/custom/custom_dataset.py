@@ -1,6 +1,7 @@
 import copy
 import pickle
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -64,7 +65,10 @@ class CustomDataset(DatasetTemplate):
 
     def get_lidar(self, idx):
         lidar_file = self.root_path / 'points' / ('%s.npy' % idx)
-        assert lidar_file.exists()
+        if not lidar_file.exists():
+            raise FileNotFoundError(
+                f"Missing points file: {lidar_file} (from lidar_idx='{idx}')"
+            )
         point_features = np.load(lidar_file)
         # Pad a zero "timestamp" column if points are 4D (N,4)
         if point_features.ndim == 2 and point_features.shape[1] == 4:

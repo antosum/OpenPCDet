@@ -44,6 +44,16 @@ Update a dataset YAML in-place:
         --quantile 0.01 \
         --update-yaml tools/cfgs/dataset_configs/geminai_dataset.yaml
 
+Estimate MAX_NUMBER_OF_VOXELS (pillar cap):
+    # Requires --voxel-size. Counts unique XY voxels per frame and prints a cap
+    # using a high quantile and a safety multiplier.
+    python tools/compute_point_cloud_range.py data/custom \
+        --splits train,val \
+        --voxel-size 0.2,0.2,8.0 \
+        --estimate-max-voxels \
+        --max-voxels-quantile 0.99 \
+        --voxels-safety-multiplier 1.10
+
 Exit codes:
     0 = success; 1 = failure updating YAML; 2 = bad args / missing files.
 """
@@ -251,6 +261,57 @@ def align_range_to_voxels(
     return (float(minx), float(miny), float(minz), float(maxx), float(maxy), float(maxz))
 
 
+def estimate_max_number_of_voxels(
+    files: Sequence[Path],
+    minx: float,
+    miny: float,
+    vx: float,
+    vy: float,
+    sample: Optional[int] = None,
+    quantile: float = 0.99,
+    safety_multiplier: float = 1.10,
+) -> Tuple[int, float, int]:
+    """Estimate MAX_NUMBER_OF_VOXELS by counting unique XY voxel indices per frame.
+
+    Returns (suggested_cap, q_value, max_observed).
+    """
+    if not (0.0 < quantile <= 1.0):
+        raise ValueError("max-voxels-quantile must be in (0, 1]")
+    vx = float(max(vx, 1e-9))
+    vy = float(max(vy, 1e-9))
+    counts: List[int] = []
+    use_files = files
+    if sample is not None and sample > 0 and sample < len(files):
+        # Uniformly sample indices
+        idxs = np.linspace(0, len(files) - 1, num=sample, dtype=int)
+        use_files = [files[i] for i in idxs]
+    for fp in use_files:
+        try:
+            arr = np.load(fp, allow_pickle=False)
+        except Exception:
+            continue
+        if arr.size == 0 or arr.ndim != 2 or arr.shape[1] < 3:
+            continue
+        pts = arr[:, :3]
+        mask = np.isfinite(pts).all(axis=1)
+        if not mask.any():
+            continue
+        pts = pts[mask]
+        # Compute 2D voxel indices
+        ix = np.floor((pts[:, 0] - minx) / vx).astype(np.int64)
+        iy = np.floor((pts[:, 1] - miny) / vy).astype(np.int64)
+        keys = ix * 1_000_000_007 + iy  # mixed radix hash to avoid collisions
+        unique = np.unique(keys)
+        counts.append(int(unique.size))
+    if not counts:
+        return (0, 0.0, 0)
+    counts_arr = np.array(counts, dtype=np.int64)
+    q_val = float(np.quantile(counts_arr, quantile))
+    max_obs = int(counts_arr.max())
+    suggested = int(np.ceil(q_val * float(safety_multiplier)))
+    return (suggested, q_val, max_obs)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -332,6 +393,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         '--z-cells', type=int, default=None,
         help='When used with --voxel-size, adjust Z extent so (extent_z / vz) equals this many cells (e.g., 1 for pillars).'
+    )
+    # Estimation of pillar caps
+    parser.add_argument(
+        '--estimate-max-voxels', action='store_true',
+        help='Estimate MAX_NUMBER_OF_VOXELS by counting unique XY voxels per frame (requires --voxel-size).'
+    )
+    parser.add_argument(
+        '--max-voxels-quantile', type=float, default=0.99,
+        help='Quantile of per-frame occupied voxel counts to set the cap (e.g., 0.99).'
+    )
+    parser.add_argument(
+        '--voxels-safety-multiplier', type=float, default=1.10,
+        help='Safety multiplier applied to the quantile estimate (e.g., 1.10).'
+    )
+    parser.add_argument(
+        '--voxels-sample', type=int, default=None,
+        help='Optional number of frames to uniformly sample for voxel cap estimation.'
     )
     parser.add_argument(
         '--update-yaml',
@@ -422,6 +500,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         f"POST_CENTER_LIMIT_RANGE: [{post_minx:.{args.precision}f}, {post_miny:.{args.precision}f}, {post_minz:.{args.precision}f}, "
         f"{post_maxx:.{args.precision}f}, {post_maxy:.{args.precision}f}, {post_maxz:.{args.precision}f}]"
     )
+
+    # Optionally estimate MAX_NUMBER_OF_VOXELS
+    if args.estimate_max_voxels:
+        if voxel_size_tuple is None:
+            print("[error] --estimate-max-voxels requires --voxel-size", file=sys.stderr)
+            return 2
+        vx, vy, vz = voxel_size_tuple
+        suggested_cap, q_val, max_obs = estimate_max_number_of_voxels(
+            files,
+            minx=minx,
+            miny=miny,
+            vx=vx,
+            vy=vy,
+            sample=args.voxels_sample,
+            quantile=args.max_voxels_quantile,
+            safety_multiplier=args.voxels_safety_multiplier,
+        )
+        print()
+        print("Voxel cap suggestion:")
+        print(
+            f"Observed occupied voxels per frame: max={max_obs}, q={args.max_voxels_quantile:.3f}≈{int(np.ceil(q_val))}"
+        )
+        print(
+            f"Suggested MAX_NUMBER_OF_VOXELS: {{train: {suggested_cap}, test: {max(max_obs, suggested_cap)}}}"
+        )
 
     if args.update_yaml:
         yaml_path = Path(args.update_yaml)

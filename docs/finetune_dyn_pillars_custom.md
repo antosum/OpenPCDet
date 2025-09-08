@@ -48,8 +48,8 @@ Keeping 4 features is possible, but VFE layers won’t load from the nuScenes ch
 
 **Head, Classes, Imbalance**
 - Class names: set `CLASS_NAMES` to match your dataset labels exactly.
-- Split heads to mitigate imbalance (dominant “other_vehicule”):
-  - `CLASS_NAMES_EACH_HEAD: [['other_vehicule'], ['belt_loader','high_loader']]`
+- Split heads to mitigate imbalance (dominant “Other_vehicle”):
+  - `CLASS_NAMES_EACH_HEAD: [['Other_vehicle'], ['belt_loader','high_loader']]`
 - Keep velocity if the pretrained checkpoint had it:
   - `SEPARATE_HEAD_CFG.HEAD_ORDER: ['center','center_z','dim','rot','vel']`
   - `HEAD_DICT` includes `'vel'`; `LOSS_CONFIG.code_weights` length = 10.
@@ -81,7 +81,7 @@ Keeping 4 features is possible, but VFE layers won’t load from the nuScenes ch
   - `POINT_CLOUD_RANGE: [32.914, -48.847, 0.0, 119.314, 47.153, 8.0]`
   - `POST_CENTER_LIMIT_RANGE: [27.914, -53.847, -2.0, 124.314, 52.153, 10.0]`  (example with XY ±5 m, Z −2/+2 m)
 - Head grouping for imbalance:
-  - `CLASS_NAMES_EACH_HEAD: [['other_vehicule'], ['belt_loader','high_loader']]`
+  - `CLASS_NAMES_EACH_HEAD: [['Other_vehicle'], ['belt_loader','high_loader']]`
 
 **Order of Operations**
 - Generate infos for custom dataset.

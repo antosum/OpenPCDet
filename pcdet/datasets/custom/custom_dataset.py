@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from ...ops.roiaware_pool3d import roiaware_pool3d_utils
 from ...utils import box_utils, common_utils
@@ -137,15 +138,85 @@ class CustomDataset(DatasetTemplate):
             )
             return ap_result_str, ap_dict
 
+        def simple_eval(eval_det_annos, eval_gt_annos, eval_class_names, iou_thresh=0.5, use_bev=True):
+            from pcdet.ops.iou3d_nms import iou3d_nms_utils as iou
+            import numpy as np
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            metrics = {c: {'TP': 0, 'FP': 0, 'FN': 0} for c in eval_class_names}
+
+            for det, gt in zip(eval_det_annos, eval_gt_annos):
+                # Per-class matching
+                for c in eval_class_names:
+                    det_mask = (det['name'] == c) if isinstance(det['name'], np.ndarray) else np.array(det['name']) == c
+                    gt_mask = (gt['name'] == c) if isinstance(gt['name'], np.ndarray) else np.array(gt['name']) == c
+                    det_boxes = det['boxes_lidar'][det_mask]
+                    gt_boxes = gt['gt_boxes_lidar'][gt_mask]
+
+                    if det_boxes.size == 0 and gt_boxes.size == 0:
+                        continue
+                    if det_boxes.size == 0 and gt_boxes.size > 0:
+                        metrics[c]['FN'] += int(gt_boxes.shape[0])
+                        continue
+                    if det_boxes.size > 0 and gt_boxes.size == 0:
+                        metrics[c]['FP'] += int(det_boxes.shape[0])
+                        continue
+
+                    if use_bev:
+                        ious = iou.boxes_iou_bev(torch.from_numpy(det_boxes).to(device), torch.from_numpy(gt_boxes).to(device)).cpu().numpy()
+                    else:
+                        ious = iou.boxes_iou3d_gpu(torch.from_numpy(det_boxes).to(device), torch.from_numpy(gt_boxes).to(device)).cpu().numpy()
+
+                    # Greedy matching by IoU
+                    det_used = np.zeros(det_boxes.shape[0], dtype=bool)
+                    gt_used = np.zeros(gt_boxes.shape[0], dtype=bool)
+                    # Iterate in descending IoU order
+                    pairs = [(i, j, ious[i, j]) for i in range(det_boxes.shape[0]) for j in range(gt_boxes.shape[0])]
+                    pairs.sort(key=lambda x: x[2], reverse=True)
+                    for i, j, v in pairs:
+                        if v < iou_thresh:
+                            break
+                        if det_used[i] or gt_used[j]:
+                            continue
+                        det_used[i] = True
+                        gt_used[j] = True
+                        metrics[c]['TP'] += 1
+
+                    metrics[c]['FP'] += int((~det_used).sum())
+                    metrics[c]['FN'] += int((~gt_used).sum())
+
+            # compute precision/recall per class
+            result_lines = []
+            flat_result = {}
+            for c in eval_class_names:
+                TP = metrics[c]['TP']; FP = metrics[c]['FP']; FN = metrics[c]['FN']
+                prec = TP / max(TP + FP, 1)
+                rec = TP / max(TP + FN, 1)
+                result_lines.append(f"{c}: P={prec:.3f} R={rec:.3f} (TP={TP} FP={FP} FN={FN})")
+                prefix = f"simple_{'bev' if use_bev else '3d'}/{c}"
+                flat_result[f"{prefix}/precision"] = float(prec)
+                flat_result[f"{prefix}/recall"] = float(rec)
+                flat_result[f"{prefix}/TP"] = float(TP)
+                flat_result[f"{prefix}/FP"] = float(FP)
+                flat_result[f"{prefix}/FN"] = float(FN)
+
+            header = f"Simple {'BEV' if use_bev else '3D'} metrics @IoU={iou_thresh:.2f}"
+            result_str = header + "\n" + "\n".join(result_lines)
+            return result_str, flat_result
+
         eval_det_annos = copy.deepcopy(det_annos)
         eval_gt_annos = [copy.deepcopy(info['annos']) for info in self.custom_infos]
 
-        if kwargs['eval_metric'] == 'kitti':
+        metric = kwargs.get('eval_metric', 'kitti')
+        if metric == 'kitti':
             ap_result_str, ap_dict = kitti_eval(eval_det_annos, eval_gt_annos, self.map_class_to_kitti)
+            return ap_result_str, ap_dict
+        elif metric == 'simple_bev':
+            return simple_eval(eval_det_annos, eval_gt_annos, class_names, iou_thresh=kwargs.get('iou_thresh', 0.5), use_bev=True)
+        elif metric == 'simple_3d':
+            return simple_eval(eval_det_annos, eval_gt_annos, class_names, iou_thresh=kwargs.get('iou_thresh', 0.5), use_bev=False)
         else:
-            raise NotImplementedError
-
-        return ap_result_str, ap_dict
+            raise NotImplementedError(f"Unknown eval_metric: {metric}")
 
     def get_infos(self, class_names, num_workers=4, has_label=True, sample_id_list=None, num_features=4):
         import concurrent.futures as futures

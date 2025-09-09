@@ -1,11 +1,28 @@
 import os
 
 import torch
+import torch.nn as nn
 import tqdm
 import time
 import glob
 from torch.nn.utils import clip_grad_norm_
 from pcdet.utils import common_utils, commu_utils
+
+
+def set_bn_eval(model, freeze_affine: bool = False):
+    """Set all BatchNorm modules to eval mode to freeze running stats.
+    If freeze_affine is True, also freezes affine parameters.
+    Works with plain and DDP-wrapped models.
+    """
+    module = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+    for m in module.modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm)):
+            m.eval()
+            if freeze_affine:
+                if getattr(m, 'weight', None) is not None:
+                    m.weight.requires_grad = False
+                if getattr(m, 'bias', None) is not None:
+                    m.bias.requires_grad = False
 
 
 def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, accumulated_iter, optim_cfg,
@@ -27,6 +44,8 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         batch_time = common_utils.AverageMeter()
         forward_time = common_utils.AverageMeter()
         losses_m = common_utils.AverageMeter()
+        # Accumulate total points to compute running avg throughput
+        points_total = 0
 
     end = time.time()
     for cur_it in range(start_it, total_it_each_epoch):
@@ -40,8 +59,6 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         data_timer = time.time()
         cur_data_time = data_timer - end
 
-        lr_scheduler.step(accumulated_iter, cur_epoch)
-
         try:
             cur_lr = float(optimizer.lr)
         except:
@@ -51,6 +68,9 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
             tb_log.add_scalar('meta_data/learning_rate', cur_lr, accumulated_iter)
 
         model.train()
+        # Re-freeze BN stats each iteration if requested
+        if optim_cfg.get('BN_EVAL_DURING_TRAIN', False):
+            set_bn_eval(model, freeze_affine=optim_cfg.get('BN_FREEZE_AFFINE', False))
         optimizer.zero_grad()
 
         with torch.cuda.amp.autocast(enabled=use_amp):
@@ -61,6 +81,9 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
         scaler.step(optimizer)
         scaler.update()
+
+        # Advance LR scheduler after optimizer step to follow PyTorch guidance
+        lr_scheduler.step(accumulated_iter, cur_epoch)
 
         accumulated_iter += 1
  
@@ -76,15 +99,33 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         # log to console and tensorboard
         if rank == 0:
             batch_size = batch.get('batch_size', None)
-            
+
+            # update meters
             data_time.update(avg_data_time)
             forward_time.update(avg_forward_time)
             batch_time.update(avg_batch_time)
-            losses_m.update(loss.item() , batch_size)
-            
+            losses_m.update(loss.item(), batch_size)
+
+            # points in this batch (collated across samples)
+            cur_points = 0
+            try:
+                if isinstance(batch.get('points', None), torch.Tensor):
+                    cur_points = int(batch['points'].shape[0])
+                elif batch.get('points', None) is not None:
+                    cur_points = int(getattr(batch['points'], 'shape', [0])[0])
+            except Exception:
+                cur_points = 0
+            points_total += cur_points
+
+            # instantaneous and running-average throughput (points/sec)
+            time_past_this_epoch = pbar.format_dict.get('elapsed', 0.0)
+            pts_per_sec_cur = (cur_points / max(avg_batch_time, 1e-6)) if cur_points > 0 else 0.0
+            pts_per_sec_avg = (points_total / max(time_past_this_epoch, 1e-6)) if points_total > 0 else 0.0
+
             disp_dict.update({
                 'loss': loss.item(), 'lr': cur_lr, 'd_time': f'{data_time.val:.2f}({data_time.avg:.2f})',
-                'f_time': f'{forward_time.val:.2f}({forward_time.avg:.2f})', 'b_time': f'{batch_time.val:.2f}({batch_time.avg:.2f})'
+                'f_time': f'{forward_time.val:.2f}({forward_time.avg:.2f})', 'b_time': f'{batch_time.val:.2f}({batch_time.avg:.2f})',
+                'pts/s': f'{pts_per_sec_cur:,.0f}({pts_per_sec_avg:,.0f})'
             })
             
             if use_logger_to_record:
@@ -99,6 +140,7 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                     logger.info(
                         'Train: {:>4d}/{} ({:>3.0f}%) [{:>4d}/{} ({:>3.0f}%)]  '
                         'Loss: {loss.val:#.4g} ({loss.avg:#.3g})  '
+                        'Pts/s: {pts_cur}({pts_avg})  '
                         'LR: {lr:.3e}  '
                         f'Time cost: {tbar.format_interval(trained_time_each_epoch)}/{tbar.format_interval(remaining_second_each_epoch)} ' 
                         f'[{tbar.format_interval(trained_time_past_all)}/{tbar.format_interval(remaining_second_all)}]  '
@@ -109,6 +151,8 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                             cur_epoch+1,total_epochs, 100. * (cur_epoch+1) / total_epochs,
                             cur_it,total_it_each_epoch, 100. * cur_it / total_it_each_epoch,
                             loss=losses_m,
+                            pts_cur=f'{pts_per_sec_cur:,.0f}',
+                            pts_avg=f'{pts_per_sec_avg:,.0f}',
                             lr=cur_lr,
                             acc_iter=accumulated_iter,
                             data_time=data_time,
@@ -132,6 +176,10 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                 tb_log.add_scalar('meta_data/learning_rate', cur_lr, accumulated_iter)
                 for key, val in tb_dict.items():
                     tb_log.add_scalar('train/' + key, val, accumulated_iter)
+                # log throughput metrics
+                tb_log.add_scalar('meta_data/points_in_batch', cur_points, accumulated_iter)
+                tb_log.add_scalar('meta_data/points_per_sec', pts_per_sec_cur, accumulated_iter)
+                tb_log.add_scalar('meta_data/points_per_sec_avg', pts_per_sec_avg, accumulated_iter)
 
             # Ensure only the main process performs W&B logging
             if rank == 0 and wandb_run is not None:
@@ -141,6 +189,9 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                     'meta_data/data_time': avg_data_time,
                     'meta_data/forward_time': avg_forward_time,
                     'meta_data/batch_time': avg_batch_time,
+                    'meta_data/points_in_batch': cur_points,
+                    'meta_data/points_per_sec': pts_per_sec_cur,
+                    'meta_data/points_per_sec_avg': pts_per_sec_avg,
                 }
                 for key, val in tb_dict.items():
                     log_dict[f'train/{key}'] = val

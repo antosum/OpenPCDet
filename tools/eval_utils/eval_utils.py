@@ -55,22 +55,40 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
     if cfg.LOCAL_RANK == 0:
         progress_bar = tqdm.tqdm(total=len(dataloader), leave=True, desc='eval', dynamic_ncols=True)
     start_time = time.time()
+    # accumulate throughput across this eval phase
+    points_total = 0
+    time_total = 0.0
     for i, batch_dict in enumerate(dataloader):
         load_data_to_gpu(batch_dict)
 
-        if getattr(args, 'infer_time', False):
-            start_time = time.time()
-
+        # measure forward time for throughput regardless of args.infer_time
+        _t0 = time.time()
         with torch.no_grad():
             pred_dicts, ret_dict = model(batch_dict)
+        inference_time = time.time() - _t0
 
         disp_dict = {}
 
         if getattr(args, 'infer_time', False):
-            inference_time = time.time() - start_time
             infer_time_meter.update(inference_time * 1000)
             # use ms to measure inference time
             disp_dict['infer_time'] = f'{infer_time_meter.val:.2f}({infer_time_meter.avg:.2f})'
+
+        # compute instantaneous and running-average points/sec
+        cur_points = 0
+        try:
+            pts = batch_dict.get('points', None)
+            if isinstance(pts, torch.Tensor):
+                cur_points = int(pts.shape[0])
+            elif pts is not None:
+                cur_points = int(getattr(pts, 'shape', [0])[0])
+        except Exception:
+            cur_points = 0
+        points_total += cur_points
+        time_total += max(inference_time, 0.0)
+        pts_per_sec_cur = (cur_points / max(inference_time, 1e-6)) if cur_points > 0 else 0.0
+        pts_per_sec_avg = (points_total / max(time_total, 1e-6)) if points_total > 0 else 0.0
+        disp_dict['pts/s'] = f'{pts_per_sec_cur:,.0f}({pts_per_sec_avg:,.0f})'
 
         statistics_info(cfg, ret_dict, metric, disp_dict)
         annos = dataset.generate_prediction_dicts(
@@ -129,6 +147,12 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
     )
 
     logger.info(result_str)
+    # add overall throughput to returned metrics (for wandb/tb logging)
+    overall_pts_per_sec = (points_total / max(time_total, 1e-6)) if points_total > 0 else 0.0
+    ret_dict['throughput/points_per_sec'] = overall_pts_per_sec
+    # also report average points per example to help compare subsampling
+    avg_points_per_example = (points_total / max(len(dataloader), 1)) if points_total > 0 else 0.0
+    ret_dict['throughput/avg_points_per_batch'] = avg_points_per_example
     ret_dict.update(result_dict)
 
     logger.info('Result is saved to %s' % result_dir)

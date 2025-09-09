@@ -1,0 +1,47 @@
+DATASET: 'CustomDataset'
+DATA_PATH: '/home/antonin-sumner/data/openpcdet_data/data/geminai_V0'
+
+POINT_CLOUD_RANGE: [32.914, -48.847, 0.0, 119.314, 47.153, 8.0]
+
+MAP_CLASS_TO_KITTI: {
+    'Belt_loader': 'Car',
+    'High_loader': 'Car',
+    'Other_vehicle': 'Car',
+}
+
+DATA_SPLIT: {
+    'train': train,
+    'test': val
+}
+
+INFO_PATH: {
+    'train': [custom_infos_train.pkl],
+    'test': [custom_infos_val.pkl],
+}
+
+POINT_FEATURE_ENCODING: {
+    encoding_type: absolute_coordinates_encoding,
+    used_feature_list: ['x', 'y', 'z', 'intensity', 'timestamp'],
+    src_feature_list: ['x', 'y', 'z', 'intensity', 'timestamp'],
+}
+
+DATA_AUGMENTOR:
+    DISABLE_AUG_LIST: ['placeholder']
+    AUG_CONFIG_LIST:
+        - NAME: random_world_rotation
+          WORLD_ROT_ANGLE: [-0.17453293, 0.17453293]
+        - NAME: random_world_scaling
+          WORLD_SCALE_RANGE: [0.95, 1.05]
+
+DATA_PROCESSOR:
+    -   NAME: mask_points_and_boxes_outside_range
+        REMOVE_OUTSIDE_BOXES: True
+
+    -   NAME: shuffle_points
+        SHUFFLE_ENABLED: {
+            'train': True,
+            'test': True
+        }
+
+    -   NAME: transform_points_to_voxels_placeholder
+        VOXEL_SIZE: [0.2, 0.2, 8.0]

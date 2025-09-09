@@ -19,7 +19,8 @@ from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_f
 from pcdet.datasets import build_dataloader
 from pcdet.models import build_network, model_fn_decorator
 from pcdet.utils import common_utils
-from train_utils.optimization import build_optimizer, build_scheduler
+from train_utils.optimization import build_optimizer, build_scheduler, get_finetune_groups_summary
+from train_utils.wandb_utils import set_quick_dashboard_keys, log_run_basics, record_quick_summary
 from train_utils.train_utils import train_model
 
 
@@ -149,25 +150,10 @@ def main():
 
             cfg_dict = edict_to_dict(cfg)
             wandb_run = wandb.init(project=cfg.WANDB.PROJECT, config=cfg_dict)
-            # dataset stats
-            class_counts = {}
-            total_boxes = 0
-            for info in getattr(train_set, 'custom_infos', []):
-                if 'annos' not in info:
-                    continue
-                names = info['annos']['name']
-                total_boxes += len(names)
-                for n in names:
-                    class_counts[n] = class_counts.get(n, 0) + 1
-            ds_stats = {
-                'dataset/name': str(cfg.DATA_CONFIG.get('DATA_PATH', '')),
-                'dataset/train_samples': len(train_set),
-                'dataset/avg_boxes_per_sample': total_boxes / max(len(train_set.custom_infos), 1),
-            }
-            for k, v in class_counts.items():
-                ds_stats[f'dataset/class_counts/{k}'] = v
-            ds_stats['dataset/point_cloud_range'] = cfg.DATA_CONFIG.get('POINT_CLOUD_RANGE')
-            wandb_run.config.update(ds_stats, allow_val_change=True)
+
+            # Quick dashboard keys and basic metadata
+            set_quick_dashboard_keys(wandb_run)
+            log_run_basics(wandb_run, cfg, train_set, per_gpu_batch_size=args.batch_size, total_gpus=total_gpus)
 
     model = build_network(model_cfg=cfg.MODEL, num_class=len(cfg.CLASS_NAMES), dataset=train_set)
     if args.sync_bn:
@@ -179,6 +165,19 @@ def main():
     # load checkpoint if it is possible
     start_epoch = it = 0
     last_epoch = -1
+
+    # Allow config-driven checkpoints
+    if args.pretrained_model is None:
+        args.pretrained_model = cfg.get('PRETRAINED_MODEL', None)
+    if args.ckpt is None:
+        args.ckpt = cfg.get('CKPT', cfg.get('RESUME_FROM', None))
+
+    # Verbose: show resolved checkpoint sources
+    if args.pretrained_model is not None:
+        logger.info(f"Resolved PRETRAINED_MODEL from config: {args.pretrained_model}")
+    if args.ckpt is not None:
+        logger.info(f"Resolved CKPT/RESUME_FROM from config: {args.ckpt}")
+
     if args.pretrained_model is not None:
         model.load_params_from_file(filename=args.pretrained_model, to_cpu=dist_train, logger=logger)
 
@@ -186,25 +185,75 @@ def main():
         it, start_epoch = model.load_params_with_optimizer(args.ckpt, to_cpu=dist_train, optimizer=optimizer, logger=logger)
         last_epoch = start_epoch + 1
     else:
-        ckpt_list = glob.glob(str(ckpt_dir / '*.pth'))
-              
-        if len(ckpt_list) > 0:
-            ckpt_list.sort(key=os.path.getmtime)
-            while len(ckpt_list) > 0:
-                try:
-                    it, start_epoch = model.load_params_with_optimizer(
-                        ckpt_list[-1], to_cpu=dist_train, optimizer=optimizer, logger=logger
-                    )
-                    last_epoch = start_epoch + 1
-                    break
-                except:
-                    ckpt_list = ckpt_list[:-1]
+        auto_resume = cfg.get('TRAIN', {}).get('AUTO_RESUME', True)
+        if auto_resume:
+            ckpt_list = glob.glob(str(ckpt_dir / '*.pth'))
+            if len(ckpt_list) > 0:
+                ckpt_list.sort(key=os.path.getmtime)
+                while len(ckpt_list) > 0:
+                    try:
+                        it, start_epoch = model.load_params_with_optimizer(
+                            ckpt_list[-1], to_cpu=dist_train, optimizer=optimizer, logger=logger
+                        )
+                        last_epoch = start_epoch + 1
+                        # If the checkpoint already completed all target epochs, skip resuming
+                        if start_epoch >= args.epochs:
+                            logger.info(f"Found checkpoint at epoch {start_epoch} >= target epochs {args.epochs}. Starting a fresh run without resuming.")
+                            # Reset optimizer to clear loaded state
+                            optimizer = build_optimizer(model, cfg.OPTIMIZATION)
+                            start_epoch = 0
+                            it = 0
+                            last_epoch = -1
+                        break
+                    except:
+                        ckpt_list = ckpt_list[:-1]
+        else:
+            logger.info('AUTO_RESUME disabled by config; not scanning for existing checkpoints.')
 
     model.train()  # before wrap to DistributedDataParallel to support fixed some parameters
     if dist_train:
         model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
     logger.info(f'----------- Model {cfg.MODEL.NAME} created, param count: {sum([m.numel() for m in model.parameters()])} -----------')
     logger.info(model)
+
+    # Log fine-tune group summary to wandb (lightweight, config-level)
+    try:
+        if wandb_run is not None:
+            ft_summary = get_finetune_groups_summary(optimizer, cfg.OPTIMIZATION)
+            wandb_run.config.update(ft_summary, allow_val_change=True)
+    except Exception:
+        pass
+
+    # Verbose console logging of finetune settings
+    try:
+        ft_summary = get_finetune_groups_summary(optimizer, cfg.OPTIMIZATION)
+        freeze_modules = ft_summary['finetune'].get('freeze_modules', [])
+        bn_eval = ft_summary['finetune'].get('bn_eval_during_train', False)
+        bn_affine = ft_summary['finetune'].get('bn_freeze_affine', False)
+        logger.info(f"[Finetune] Freeze modules: {freeze_modules if freeze_modules else '[]'}")
+        logger.info(f"[Finetune] BN eval during train: {bn_eval} (freeze affine: {bn_affine})")
+
+        # Print logical group settings
+        groups = ft_summary['finetune'].get('groups', [])
+        if groups:
+            logger.info("[Finetune] Logical groups (max_lr, init_lr, wd, counts):")
+            for g in groups:
+                logger.info(
+                    f"  - {g['name']}: max_lr={g['max_lr']:.3e}, init_lr={g['init_lr']:.3e}, "
+                    f"wd={g.get('weight_decay')}, params={g['params_count']}, "
+                    f"decay={g['decay_count']}, nodecay={g['nodecay_count']}"
+                )
+
+        # Print actual optimizer param_groups order
+        logger.info("[Finetune] Optimizer param_groups order (lr_init, wd, size):")
+        for i, pg in enumerate(getattr(optimizer, 'param_groups', [])):
+            gname = pg.get('group_name', f'group_{i}')
+            n_params = sum(p.numel() for p in pg.get('params', []))
+            lr_init = pg.get('lr', 0.0)
+            wd = pg.get('weight_decay', 0.0)
+            logger.info(f"  [{i}] {gname}: lr_init={lr_init:.3e}, wd={wd}, params={n_params}")
+    except Exception:
+        pass
 
     lr_scheduler, lr_warmup_scheduler = build_scheduler(
         optimizer, total_iters_each_epoch=len(train_loader), total_epochs=args.epochs,
@@ -261,7 +310,11 @@ def main():
         wandb_run.config.update({'dataset/val_samples': len(test_set)})
     eval_output_dir = output_dir / 'eval' / 'eval_with_train'
     eval_output_dir.mkdir(parents=True, exist_ok=True)
-    args.start_epoch = max(args.epochs - args.num_epochs_to_eval, 0)  # Only evaluate the last args.num_epochs_to_eval epochs
+    # Only evaluate the last args.num_epochs_to_eval epochs; if 0 (unspecified), evaluate the latest checkpoint once
+    if args.num_epochs_to_eval is None or args.num_epochs_to_eval <= 0:
+        args.start_epoch = max(args.epochs - 1, 0)
+    else:
+        args.start_epoch = max(args.epochs - args.num_epochs_to_eval, 0)
 
     repeat_eval_ckpt(
         model.module if dist_train else model,
@@ -276,6 +329,8 @@ def main():
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
     if wandb_run is not None:
+        # Record concise summary for cross-run comparison
+        record_quick_summary(wandb_run, cfg, epochs=args.epochs, extra_tag=args.extra_tag)
         wandb_run.finish()
 
 

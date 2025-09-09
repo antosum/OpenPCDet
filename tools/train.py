@@ -10,6 +10,11 @@ import torch
 import torch.nn as nn
 from tensorboardX import SummaryWriter
 
+try:
+    import wandb
+except ImportError:  # pragma: no cover
+    wandb = None
+
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
 from pcdet.models import build_network, model_fn_decorator
@@ -129,6 +134,41 @@ def main():
         seed=666 if args.fix_random_seed else None
     )
 
+    wandb_run = None
+    if cfg.get('WANDB', {}).get('USE', False) and cfg.LOCAL_RANK == 0:
+        if wandb is None:
+            logger.warning('wandb is not installed, skipping wandb logging')
+        else:
+            def edict_to_dict(e):
+                from easydict import EasyDict
+                if isinstance(e, EasyDict) or isinstance(e, dict):
+                    return {k: edict_to_dict(v) for k, v in e.items()}
+                if isinstance(e, list):
+                    return [edict_to_dict(v) for v in e]
+                return e
+
+            cfg_dict = edict_to_dict(cfg)
+            wandb_run = wandb.init(project=cfg.WANDB.PROJECT, config=cfg_dict)
+            # dataset stats
+            class_counts = {}
+            total_boxes = 0
+            for info in getattr(train_set, 'custom_infos', []):
+                if 'annos' not in info:
+                    continue
+                names = info['annos']['name']
+                total_boxes += len(names)
+                for n in names:
+                    class_counts[n] = class_counts.get(n, 0) + 1
+            ds_stats = {
+                'dataset/name': str(cfg.DATA_CONFIG.get('DATA_PATH', '')),
+                'dataset/train_samples': len(train_set),
+                'dataset/avg_boxes_per_sample': total_boxes / max(len(train_set.custom_infos), 1),
+            }
+            for k, v in class_counts.items():
+                ds_stats[f'dataset/class_counts/{k}'] = v
+            ds_stats['dataset/point_cloud_range'] = cfg.DATA_CONFIG.get('POINT_CLOUD_RANGE')
+            wandb_run.config.update(ds_stats, allow_val_change=True)
+
     model = build_network(model_cfg=cfg.MODEL, num_class=len(cfg.CLASS_NAMES), dataset=train_set)
     if args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -199,7 +239,8 @@ def main():
         use_logger_to_record=not args.use_tqdm_to_record, 
         show_gpu_stat=not args.wo_gpu_stat,
         use_amp=args.use_amp,
-        cfg=cfg
+        cfg=cfg,
+        wandb_run=wandb_run
     )
 
     if hasattr(train_set, 'use_shared_memory') and train_set.use_shared_memory:
@@ -216,6 +257,8 @@ def main():
         batch_size=args.batch_size,
         dist=dist_train, workers=args.workers, logger=logger, training=False
     )
+    if wandb_run is not None:
+        wandb_run.config.update({'dataset/val_samples': len(test_set)})
     eval_output_dir = output_dir / 'eval' / 'eval_with_train'
     eval_output_dir.mkdir(parents=True, exist_ok=True)
     args.start_epoch = max(args.epochs - args.num_epochs_to_eval, 0)  # Only evaluate the last args.num_epochs_to_eval epochs
@@ -223,10 +266,17 @@ def main():
     repeat_eval_ckpt(
         model.module if dist_train else model,
         test_loader, args, eval_output_dir, logger, ckpt_dir,
-        dist_test=dist_train
+        dist_test=dist_train,
+        wandb_run=wandb_run,
+        best_key=cfg.get('WANDB', {}).get('BEST_KEY'),
+        save_artifacts=cfg.get('WANDB', {}).get('SAVE_ARTIFACTS', True),
+        wandb_phase='valid'
     )
     logger.info('**********************End evaluation %s/%s(%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == '__main__':

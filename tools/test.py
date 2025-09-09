@@ -12,6 +12,11 @@ import torch
 from tensorboardX import SummaryWriter
 
 from eval_utils import eval_utils
+import shutil
+try:
+    import wandb
+except ImportError:  # pragma: no cover
+    wandb = None
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
 from pcdet.models import build_network
@@ -86,7 +91,8 @@ def get_no_evaluated_ckpt(ckpt_dir, ckpt_record_file, args):
     return -1, None
 
 
-def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir, dist_test=False):
+def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir, dist_test=False,
+                     wandb_run=None, best_key=None, save_artifacts=False, wandb_phase: str = None):
     # evaluated ckpt record
     ckpt_record_file = eval_output_dir / ('eval_list_%s.txt' % cfg.DATA_CONFIG.DATA_SPLIT['test'])
     with open(ckpt_record_file, 'a'):
@@ -97,6 +103,10 @@ def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir
         tb_log = SummaryWriter(log_dir=str(eval_output_dir / ('tensorboard_%s' % cfg.DATA_CONFIG.DATA_SPLIT['test'])))
     total_time = 0
     first_eval = True
+    best_metric = float('-inf')
+    best_epoch = None
+    best_ckpt_path = None
+    last_ckpt_path = None
 
     while True:
         # check whether there is checkpoint which is not evaluated
@@ -128,11 +138,48 @@ def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir
         if cfg.LOCAL_RANK == 0:
             for key, val in tb_dict.items():
                 tb_log.add_scalar(key, val, cur_epoch_id)
+            if wandb_run is not None:
+                # Use the checkpoint's global iteration as the WandB step to keep it monotonic
+                ckpt_it = None
+                try:
+                    ckpt_data = torch.load(cur_ckpt, map_location='cpu')
+                    ckpt_it = int(ckpt_data.get('it', 0))
+                except Exception:
+                    ckpt_it = None
+                step_to_log = (ckpt_it + 1) if ckpt_it is not None else int(float(cur_epoch_id))
+                # Optionally namespace metrics under a phase (e.g., 'valid' or 'test')
+                if isinstance(wandb_phase, str) and len(wandb_phase) > 0:
+                    prefixed = {f"{wandb_phase}/{k}": v for k, v in tb_dict.items()}
+                else:
+                    prefixed = tb_dict
+                wandb_run.log(prefixed, step=step_to_log)
+                if best_key is not None and best_key in tb_dict:
+                    cur_metric = tb_dict[best_key]
+                    if cur_metric > best_metric:
+                        best_metric = cur_metric
+                        best_epoch = cur_epoch_id
+                        best_ckpt_path = ckpt_dir / 'best_model.pth'
+                        shutil.copyfile(cur_ckpt, best_ckpt_path)
+                        if save_artifacts:
+                            art = wandb.Artifact('best_model', type='model')
+                            art.add_file(str(best_ckpt_path))
+                            wandb_run.log_artifact(art)
+
+        last_ckpt_path = cur_ckpt
 
         # record this epoch which has been evaluated
         with open(ckpt_record_file, 'a') as f:
             print('%s' % cur_epoch_id, file=f)
         logger.info('Epoch %s has been evaluated' % cur_epoch_id)
+
+    if cfg.LOCAL_RANK == 0 and wandb_run is not None:
+        if save_artifacts and last_ckpt_path is not None:
+            art = wandb.Artifact('last_model', type='model')
+            art.add_file(str(last_ckpt_path))
+            wandb_run.log_artifact(art)
+        if best_epoch is not None:
+            wandb_run.summary['best_epoch'] = int(float(best_epoch))
+            wandb_run.summary['best_metric'] = best_metric
 
 
 def main():

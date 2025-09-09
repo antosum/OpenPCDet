@@ -143,7 +143,10 @@ class CustomDataset(DatasetTemplate):
             import numpy as np
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-            metrics = {c: {'TP': 0, 'FP': 0, 'FN': 0} for c in eval_class_names}
+            metrics = {
+                c: {'TP': 0, 'FP': 0, 'FN': 0, 'scores': [], 'matches': []}
+                for c in eval_class_names
+            }
 
             for det, gt in zip(eval_det_annos, eval_gt_annos):
                 # Per-class matching
@@ -159,13 +162,22 @@ class CustomDataset(DatasetTemplate):
                         metrics[c]['FN'] += int(gt_boxes.shape[0])
                         continue
                     if det_boxes.size > 0 and gt_boxes.size == 0:
+                        scores = det['score'][det_mask]
+                        metrics[c]['scores'].extend(scores.tolist())
+                        metrics[c]['matches'].extend([0] * scores.shape[0])
                         metrics[c]['FP'] += int(det_boxes.shape[0])
                         continue
 
                     if use_bev:
-                        ious = iou.boxes_iou_bev(torch.from_numpy(det_boxes).to(device), torch.from_numpy(gt_boxes).to(device)).cpu().numpy()
+                        ious = iou.boxes_iou_bev(
+                            torch.from_numpy(det_boxes).to(device),
+                            torch.from_numpy(gt_boxes).to(device)
+                        ).cpu().numpy()
                     else:
-                        ious = iou.boxes_iou3d_gpu(torch.from_numpy(det_boxes).to(device), torch.from_numpy(gt_boxes).to(device)).cpu().numpy()
+                        ious = iou.boxes_iou3d_gpu(
+                            torch.from_numpy(det_boxes).to(device),
+                            torch.from_numpy(gt_boxes).to(device)
+                        ).cpu().numpy()
 
                     # Greedy matching by IoU
                     det_used = np.zeros(det_boxes.shape[0], dtype=bool)
@@ -182,26 +194,54 @@ class CustomDataset(DatasetTemplate):
                         gt_used[j] = True
                         metrics[c]['TP'] += 1
 
+                    scores = det['score'][det_mask]
+                    metrics[c]['scores'].extend(scores.tolist())
+                    metrics[c]['matches'].extend(det_used.astype(float).tolist())
                     metrics[c]['FP'] += int((~det_used).sum())
                     metrics[c]['FN'] += int((~gt_used).sum())
 
             # compute precision/recall per class
             result_lines = []
             flat_result = {}
+            ap_list = []
             for c in eval_class_names:
                 TP = metrics[c]['TP']; FP = metrics[c]['FP']; FN = metrics[c]['FN']
+                scores = np.array(metrics[c]['scores'])
+                matches = np.array(metrics[c]['matches'])
                 prec = TP / max(TP + FP, 1)
                 rec = TP / max(TP + FN, 1)
-                result_lines.append(f"{c}: P={prec:.3f} R={rec:.3f} (TP={TP} FP={FP} FN={FN})")
+
+                if scores.size > 0:
+                    order = scores.argsort()[::-1]
+                    matches_ord = matches[order]
+                    tp_cum = np.cumsum(matches_ord)
+                    fp_cum = np.cumsum(1 - matches_ord)
+                    recalls = tp_cum / max(TP + FN, 1)
+                    precisions = tp_cum / np.maximum(tp_cum + fp_cum, 1)
+                    mrec = np.concatenate(([0.0], recalls, [1.0]))
+                    mpre = np.concatenate(([0.0], precisions, [0.0]))
+                    mpre = np.maximum.accumulate(mpre[::-1])[::-1]
+                    ap = np.sum((mrec[1:] - mrec[:-1]) * mpre[1:])
+                else:
+                    ap = 0.0
+                ap_list.append(ap)
+
+                result_lines.append(
+                    f"{c}: AP@0.5={ap:.3f} P={prec:.3f} R={rec:.3f} (TP={TP} FP={FP} FN={FN})"
+                )
                 prefix = f"simple_{'bev' if use_bev else '3d'}/{c}"
+                flat_result[f"{prefix}/AP@0.5"] = float(ap)
                 flat_result[f"{prefix}/precision"] = float(prec)
                 flat_result[f"{prefix}/recall"] = float(rec)
                 flat_result[f"{prefix}/TP"] = float(TP)
                 flat_result[f"{prefix}/FP"] = float(FP)
                 flat_result[f"{prefix}/FN"] = float(FN)
 
+            mAP = float(np.mean(ap_list)) if ap_list else 0.0
+            prefix = f"simple_{'bev' if use_bev else '3d'}"
+            flat_result[f"{prefix}/mAP@0.5"] = mAP
             header = f"Simple {'BEV' if use_bev else '3D'} metrics @IoU={iou_thresh:.2f}"
-            result_str = header + "\n" + "\n".join(result_lines)
+            result_str = header + "\n" + f"mAP@0.5={mAP:.3f}\n" + "\n".join(result_lines)
             return result_str, flat_result
 
         eval_det_annos = copy.deepcopy(det_annos)

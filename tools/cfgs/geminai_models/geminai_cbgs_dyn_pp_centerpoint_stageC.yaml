@@ -89,7 +89,10 @@ MODEL:
 
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 8
+    WORKERS: 16
     NUM_EPOCHS: 4          # Stage C duration
+    # Evaluate the model every N epochs during training (0 disables)
+    EVAL_EVERY_N_EPOCHS: 0
 
     OPTIMIZER: adamw_onecycle
     LR: 0.0002             # Keep base near the head max LR

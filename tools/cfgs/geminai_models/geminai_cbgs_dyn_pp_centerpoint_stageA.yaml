@@ -89,7 +89,10 @@ MODEL:
 
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 8
+    WORKERS: 16          # Dataloader workers (overrides CLI when not provided)
     NUM_EPOCHS: 2          # Stage A duration
+    # Evaluate the model every N epochs during training (0 disables)
+    EVAL_EVERY_N_EPOCHS: 1
 
     OPTIMIZER: adamw_onecycle
     LR: 0.0005              # Base LR (max_lr per group below)

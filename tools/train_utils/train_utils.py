@@ -7,6 +7,7 @@ import time
 import glob
 from torch.nn.utils import clip_grad_norm_
 from pcdet.utils import common_utils, commu_utils
+from eval_utils import eval_utils
 
 
 def set_bn_eval(model, freeze_affine: bool = False):
@@ -78,7 +79,8 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
+        # Compute total gradient norm (pre-clipping) and apply clipping
+        grad_norm = clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
         scaler.step(optimizer)
         scaler.update()
 
@@ -180,9 +182,18 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                 tb_log.add_scalar('meta_data/points_in_batch', cur_points, accumulated_iter)
                 tb_log.add_scalar('meta_data/points_per_sec', pts_per_sec_cur, accumulated_iter)
                 tb_log.add_scalar('meta_data/points_per_sec_avg', pts_per_sec_avg, accumulated_iter)
+                # log gradient norm
+                try:
+                    tb_log.add_scalar('meta_data/grad_norm', float(getattr(grad_norm, 'item', lambda: grad_norm)()), accumulated_iter)
+                except Exception:
+                    try:
+                        tb_log.add_scalar('meta_data/grad_norm', float(grad_norm), accumulated_iter)
+                    except Exception:
+                        pass
 
             # Ensure only the main process performs W&B logging
             if rank == 0 and wandb_run is not None:
+                # prepare wandb log dict
                 log_dict = {
                     'train/loss': loss.item(),
                     'meta_data/learning_rate': cur_lr,
@@ -193,6 +204,14 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                     'meta_data/points_per_sec': pts_per_sec_cur,
                     'meta_data/points_per_sec_avg': pts_per_sec_avg,
                 }
+                # add gradient norm if available
+                try:
+                    log_dict['meta_data/grad_norm'] = float(getattr(grad_norm, 'item', lambda: grad_norm)())
+                except Exception:
+                    try:
+                        log_dict['meta_data/grad_norm'] = float(grad_norm)
+                    except Exception:
+                        pass
                 for key, val in tb_dict.items():
                     log_dict[f'train/{key}'] = val
                 wandb_run.log(log_dict, step=accumulated_iter)
@@ -217,7 +236,13 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 lr_warmup_scheduler=None, ckpt_save_interval=1, max_ckpt_save_num=50,
                 merge_all_iters_to_one_epoch=False, use_amp=False,
                 use_logger_to_record=False, logger=None, logger_iter_interval=None, ckpt_save_time_interval=None, show_gpu_stat=False, cfg=None,
-                wandb_run=None):
+                wandb_run=None,
+                # Optional evaluation during training
+                eval_every_n_epochs: int = 0,
+                eval_loader=None,
+                eval_output_dir=None,
+                dist_test: bool = False,
+                args=None):
     accumulated_iter = start_iter
 
     # use for disable data augmentation hook
@@ -276,6 +301,39 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 save_checkpoint(
                     checkpoint_state(model, optimizer, trained_epoch, accumulated_iter), filename=ckpt_name,
                 )
+
+            # Evaluate during training at the requested frequency
+            if eval_every_n_epochs and eval_loader is not None and eval_output_dir is not None:
+                if trained_epoch % int(eval_every_n_epochs) == 0:
+                    # All ranks participate in evaluation for correct metrics when dist is enabled
+                    try:
+                        if logger is not None and rank == 0:
+                            logger.info(f"[Eval] Running validation at epoch {trained_epoch} (every {eval_every_n_epochs} epochs)")
+
+                        # Use underlying module for evaluation to avoid double-wrapping DDP
+                        eval_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+                        split = cfg.DATA_CONFIG.DATA_SPLIT['test'] if hasattr(cfg.DATA_CONFIG, 'DATA_SPLIT') else 'val'
+                        cur_result_dir = eval_output_dir / (f'epoch_{trained_epoch}') / split
+
+                        # Run evaluation
+                        tb_dict = eval_utils.eval_one_epoch(
+                            cfg, args, eval_model, eval_loader, trained_epoch, logger if logger is not None else common_utils.create_logger(None),
+                            dist_test=dist_test, result_dir=cur_result_dir
+                        )
+
+                        # Log summarized eval metrics to tb and wandb (rank 0 only)
+                        if rank == 0:
+                            if tb_log is not None:
+                                for key, val in tb_dict.items():
+                                    tb_log.add_scalar(key, val, trained_epoch)
+                            if wandb_run is not None:
+                                try:
+                                    wandb_run.log({f'valid/{k}': v for k, v in tb_dict.items()}, step=accumulated_iter)
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        if logger is not None and rank == 0:
+                            logger.warning(f"[Eval] Validation at epoch {trained_epoch} failed: {e}")
 
 
 def model_state_to_cpu(model_state):

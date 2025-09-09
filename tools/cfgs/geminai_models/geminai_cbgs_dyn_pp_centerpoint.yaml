@@ -84,6 +84,8 @@ MODEL:
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 8
     NUM_EPOCHS: 2
+    # Evaluate the model every N epochs during training (0 disables)
+    EVAL_EVERY_N_EPOCHS: 0
 
     OPTIMIZER: adamw_onecycle
     LR: 0.001

@@ -249,6 +249,15 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
     hook_config = cfg.get('HOOK', None) 
     augment_disable_flag = False
 
+    # Track best metric during training-eval (rank 0 only saves)
+    best_metric = float('-inf')
+    best_epoch = None
+    best_key = None
+    try:
+        best_key = cfg.get('WANDB', {}).get('BEST_KEY', None)
+    except Exception:
+        best_key = None
+
     with tqdm.trange(start_epoch, total_epochs, desc='epochs', dynamic_ncols=True, leave=(rank == 0)) as tbar:
         total_it_each_epoch = len(train_loader)
         if merge_all_iters_to_one_epoch:
@@ -331,6 +340,34 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                                     wandb_run.log({f'valid/{k}': v for k, v in tb_dict.items()}, step=accumulated_iter)
                                 except Exception:
                                     pass
+
+                            # Best-model tracking and saving
+                            if isinstance(best_key, str) and best_key in tb_dict:
+                                cur_metric = tb_dict[best_key]
+                                if cur_metric > best_metric:
+                                    best_metric = cur_metric
+                                    best_epoch = trained_epoch
+                                    # Save current model as best_model.pth
+                                    best_ckpt_path = ckpt_save_dir / 'best_model'
+                                    save_checkpoint(
+                                        checkpoint_state(model, optimizer, trained_epoch, accumulated_iter), filename=best_ckpt_path,
+                                    )
+                                    if logger is not None:
+                                        logger.info(f"[Eval] New best {best_key}={cur_metric:.6f} at epoch {trained_epoch}. Saved to {best_ckpt_path}.pth")
+                                    # Optionally log artifact to wandb
+                                    try:
+                                        from importlib import import_module
+                                        wandb_mod = import_module('wandb') if wandb_run is not None else None
+                                        save_artifacts = getattr(getattr(cfg, 'WANDB', {}), 'SAVE_ARTIFACTS', True)
+                                        if wandb_mod is not None and save_artifacts:
+                                            art = wandb_mod.Artifact('best_model', type='model')
+                                            art.add_file(str((best_ckpt_path.with_suffix('.pth'))))
+                                            wandb_run.log_artifact(art)
+                                        if wandb_run is not None:
+                                            wandb_run.summary['best_epoch'] = int(best_epoch)
+                                            wandb_run.summary['best_metric'] = float(best_metric)
+                                    except Exception:
+                                        pass
                     except Exception as e:
                         if logger is not None and rank == 0:
                             logger.warning(f"[Eval] Validation at epoch {trained_epoch} failed: {e}")

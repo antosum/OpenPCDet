@@ -352,35 +352,39 @@ def main():
     logger.info('**********************End training %s/%s(%s)**********************\n\n\n'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
-    logger.info('**********************Start evaluation %s/%s(%s)**********************' %
-                (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
-    test_set, test_loader, sampler = build_dataloader(
-        dataset_cfg=cfg.DATA_CONFIG,
-        class_names=cfg.CLASS_NAMES,
-        batch_size=args.batch_size,
-        dist=dist_train, workers=args.workers, logger=logger, training=False
-    )
-    if wandb_run is not None:
-        wandb_run.config.update({'dataset/val_samples': len(test_set)})
-    eval_output_dir = output_dir / 'eval' / 'eval_with_train'
-    eval_output_dir.mkdir(parents=True, exist_ok=True)
-    # Only evaluate the last args.num_epochs_to_eval epochs; if 0 (unspecified), evaluate the latest checkpoint once
-    if args.num_epochs_to_eval is None or args.num_epochs_to_eval <= 0:
-        args.start_epoch = max(args.epochs - 1, 0)
+    # If eval-during-train is enabled, skip the post-training repeat-eval to avoid duplicate evals
+    if eval_every_n > 0:
+        logger.info('Skip post-training repeat_eval_ckpt since EVAL_EVERY_N_EPOCHS is enabled.')
     else:
-        args.start_epoch = max(args.epochs - args.num_epochs_to_eval, 0)
+        logger.info('**********************Start evaluation %s/%s(%s)**********************' %
+                    (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
+        test_set, test_loader, sampler = build_dataloader(
+            dataset_cfg=cfg.DATA_CONFIG,
+            class_names=cfg.CLASS_NAMES,
+            batch_size=args.batch_size,
+            dist=dist_train, workers=args.workers, logger=logger, training=False
+        )
+        if wandb_run is not None:
+            wandb_run.config.update({'dataset/val_samples': len(test_set)})
+        eval_output_dir = output_dir / 'eval' / 'eval_with_train'
+        eval_output_dir.mkdir(parents=True, exist_ok=True)
+        # Only evaluate the last args.num_epochs_to_eval epochs; if 0 (unspecified), evaluate the latest checkpoint once
+        if args.num_epochs_to_eval is None or args.num_epochs_to_eval <= 0:
+            args.start_epoch = max(args.epochs - 1, 0)
+        else:
+            args.start_epoch = max(args.epochs - args.num_epochs_to_eval, 0)
 
-    repeat_eval_ckpt(
-        model.module if dist_train else model,
-        test_loader, args, eval_output_dir, logger, ckpt_dir,
-        dist_test=dist_train,
-        wandb_run=wandb_run,
-        best_key=cfg.get('WANDB', {}).get('BEST_KEY'),
-        save_artifacts=cfg.get('WANDB', {}).get('SAVE_ARTIFACTS', True),
-        wandb_phase='valid'
-    )
-    logger.info('**********************End evaluation %s/%s(%s)**********************' %
-                (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
+        repeat_eval_ckpt(
+            model.module if dist_train else model,
+            test_loader, args, eval_output_dir, logger, ckpt_dir,
+            dist_test=dist_train,
+            wandb_run=wandb_run,
+            best_key=cfg.get('WANDB', {}).get('BEST_KEY'),
+            save_artifacts=cfg.get('WANDB', {}).get('SAVE_ARTIFACTS', True),
+            wandb_phase='valid'
+        )
+        logger.info('**********************End evaluation %s/%s(%s)**********************' %
+                    (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
     if wandb_run is not None:
         # Record concise summary for cross-run comparison

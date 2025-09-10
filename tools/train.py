@@ -112,7 +112,17 @@ def main():
     if cfg.get('WANDB', {}).get('USE', False) and args.launcher == 'none' and args.extra_tag == 'default':
         if wandb is not None:
             try:
-                tmp_run = wandb.init(project=cfg.WANDB.PROJECT)
+                # If YAML defines tags, apply them even for early init
+                early_tags = []
+                try:
+                    tv = cfg.get('WANDB', {}).get('TAGS', [])
+                    if isinstance(tv, (list, tuple)):
+                        early_tags = [str(t) for t in tv]
+                    elif isinstance(tv, str) and tv.strip():
+                        early_tags = [tv.strip()]
+                except Exception:
+                    early_tags = []
+                tmp_run = wandb.init(project=cfg.WANDB.PROJECT, tags=early_tags or None)
                 if getattr(tmp_run, 'name', None):
                     args.extra_tag = tmp_run.name
                 wandb_run = tmp_run
@@ -186,16 +196,38 @@ def main():
                 return e
 
             cfg_dict = edict_to_dict(cfg)
+            # Collect optional tags from config
+            cfg_tags = []
+            try:
+                tags_val = cfg.get('WANDB', {}).get('TAGS', [])
+                if isinstance(tags_val, (list, tuple)):
+                    cfg_tags = [str(t) for t in tags_val]
+                elif isinstance(tags_val, str) and tags_val.strip():
+                    cfg_tags = [tags_val.strip()]
+            except Exception:
+                cfg_tags = []
+
             if wandb_run is None:
                 # Initialize now; if user set extra_tag, name run accordingly
                 if args.extra_tag != 'default':
-                    wandb_run = wandb.init(project=cfg.WANDB.PROJECT, name=f"{cfg.TAG}/{args.extra_tag}", config=cfg_dict)
+                    wandb_run = wandb.init(project=cfg.WANDB.PROJECT, name=f"{cfg.TAG}/{args.extra_tag}", config=cfg_dict, tags=cfg_tags or None)
                 else:
-                    wandb_run = wandb.init(project=cfg.WANDB.PROJECT, config=cfg_dict)
+                    wandb_run = wandb.init(project=cfg.WANDB.PROJECT, config=cfg_dict, tags=cfg_tags or None)
             else:
                 # Reuse early-initialized run and attach full config
                 try:
                     wandb_run.config.update(cfg_dict, allow_val_change=True)
+                except Exception:
+                    pass
+
+                # Ensure tags from config are reflected on the reused run
+                try:
+                    if cfg_tags:
+                        # Deduplicate while preserving existing tags
+                        existing = list(getattr(wandb_run, 'tags', []) or [])
+                        new_tags = [t for t in cfg_tags if t not in existing]
+                        if new_tags:
+                            wandb_run.tags = existing + new_tags
                 except Exception:
                     pass
 

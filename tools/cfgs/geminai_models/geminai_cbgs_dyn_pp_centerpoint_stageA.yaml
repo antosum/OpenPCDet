@@ -8,6 +8,7 @@ WANDB:
     PROJECT: geminaiV0
     BEST_KEY: simple_bev/mAP@0.5
     SAVE_ARTIFACTS: False
+    TAGS: ["finetune:A"]
 
 TRAIN:
     AUTO_RESUME: False   # Do not auto-resume when output folder already has checkpoints
@@ -90,7 +91,7 @@ MODEL:
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 8
     WORKERS: 16          # Dataloader workers (overrides CLI when not provided)
-    NUM_EPOCHS: 4         # Stage A duration
+    NUM_EPOCHS: 10         # Stage A duration
     # Evaluate the model every N epochs during training (0 disables)
     EVAL_EVERY_N_EPOCHS: 1
 
@@ -102,7 +103,7 @@ OPTIMIZATION:
     MOMS: [0.95, 0.85]
     PCT_START: 0.4
     DIV_FACTOR: 2          # warmup starts at max_lr / DIV_FACTOR
-    FINAL_DIV_FACTOR: 10000
+    FINAL_DIV_FACTOR: 1e4
     DECAY_STEP_LIST: [35, 45]
     LR_DECAY: 0.1
     LR_CLIP: 0.0000001
@@ -123,4 +124,4 @@ OPTIMIZATION:
     PARAM_GROUPS:
         - name: head
           select: ['dense_head']
-          max_lr: 0.001
+          max_lr: 1e-3

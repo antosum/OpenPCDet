@@ -8,6 +8,7 @@ WANDB:
     PROJECT: geminaiV0
     BEST_KEY: simple_bev/mAP@0.5
     SAVE_ARTIFACTS: False
+    TAGS: ["finetune:C"]
 
 TRAIN:
     AUTO_RESUME: False

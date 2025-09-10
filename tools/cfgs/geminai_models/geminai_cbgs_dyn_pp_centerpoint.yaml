@@ -8,6 +8,12 @@ WANDB:
     PROJECT: geminaiV0
     BEST_KEY: simple_bev/mAP@0.5
     SAVE_ARTIFACTS: False
+    TAGS: ["finetune:base"]
+
+TRAIN:
+    AUTO_RESUME: False
+
+PRETRAINED_MODEL: /home/antonin-sumner/data/openpcdet_data/ckpt/cbgs_pp_centerpoint_nds6070_nuscene.pth
 
 MODEL:
     NAME: CenterPoint
@@ -77,72 +83,49 @@ MODEL:
 
     POST_PROCESSING:
         RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
-
         EVAL_METRIC: simple_bev
 
 
 OPTIMIZATION:
-    BATCH_SIZE_PER_GPU: 8
-    NUM_EPOCHS: 2
+    BATCH_SIZE_PER_GPU: 12
+    WORKERS: 24
+    NUM_EPOCHS: 30
     # Evaluate the model every N epochs during training (0 disables)
-    EVAL_EVERY_N_EPOCHS: 0
+    EVAL_EVERY_N_EPOCHS: 1
+
+    USE_AMP: True
+    LOSS_SCALE_FP16: 32.0
 
     OPTIMIZER: adamw_onecycle
-    LR: 0.001
+    LR: 0.0002             # Keep base near the head max LR
     WEIGHT_DECAY: 0.01
     MOMENTUM: 0.9
 
     MOMS: [0.95, 0.85]
     PCT_START: 0.4
-    DIV_FACTOR: 2
-    FINAL_DIV_FACTOR: 10000
+    DIV_FACTOR: 10
+    FINAL_DIV_FACTOR: 1000
     DECAY_STEP_LIST: [35, 45]
     LR_DECAY: 0.1
-    LR_CLIP: 0.0000001
+    LR_CLIP: 1e-7
 
     LR_WARMUP: False
     WARMUP_EPOCH: 1
 
     GRAD_NORM_CLIP: 10
 
-    FINETUNE:
-        STAGES:
-            - name: head_only
-              num_epochs: 2
-              bn_eval: true
-              freeze: ['vfe','map_to_bev_module','backbone_2d']
-              groups:
-                - name: head
-                  select: ['dense_head']
-                  max_lr: 0.001
-                  weight_decay: 0.01
+    # Full fine-tune: unfreeze all; turn BN stats back on (optional)
+    BN_EVAL_DURING_TRAIN: false
 
-            - name: last_plus_head
-              num_epochs: 6
-              bn_eval: true
-              freeze: ['vfe','map_to_bev_module','backbone_2d.blocks[0]','backbone_2d.blocks[1]']
-              groups:
-                - name: head
-                  select: ['dense_head']
-                  max_lr: 0.001         # 5e-4 → 1e-3 with DIV_FACTOR=2
-                - name: backbone_last
-                  select: ['backbone_2d.blocks[2]','backbone_2d.deblocks[2]']
-                  max_lr: 0.0003        # 1.5e-4 → 3e-4
-                - name: rest
-                  select: ['rest']
-                  max_lr: 0.0001
+    FREEZE_MODULES: []
 
-            - name: full_ft
-              num_epochs: 4
-              bn_eval: false
-              freeze: []
-              groups:
-                - name: head
-                  select: ['dense_head']
-                  max_lr: 0.0002
-                - name: backbone_last
-                  select: ['backbone_2d.blocks[2]','backbone_2d.deblocks[2]']
-                  max_lr: 0.0001
-                - name: rest
-                  select: ['rest']
-                  max_lr: 0.00005
+    PARAM_GROUPS:
+        - name: head
+          select: ['dense_head']
+          max_lr: 0.0002
+        - name: backbone_last
+          select: ['backbone_2d.blocks[2]','backbone_2d.deblocks[2]']
+          max_lr: 0.0001
+        - name: rest
+          select: ['rest']
+          max_lr: 0.00005

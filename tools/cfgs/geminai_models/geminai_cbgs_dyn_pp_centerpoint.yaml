@@ -7,8 +7,8 @@ WANDB:
     USE: True
     PROJECT: geminaiV0
     BEST_KEY: simple_bev/mAP@0.5
-    SAVE_ARTIFACTS: False
-    TAGS: ["finetune:base"]
+    SAVE_ARTIFACTS: True
+    TAGS: ["finetune:base", "n_head:1"]
 
 TRAIN:
     AUTO_RESUME: False
@@ -42,8 +42,7 @@ MODEL:
         CLASS_AGNOSTIC: False
 
         CLASS_NAMES_EACH_HEAD: [
-            ['Other_vehicle'], 
-            ['Belt_loader','High_loader']
+            ['Other_vehicle','Belt_loader','High_loader']
         ]
 
         SHARED_CONV_CHANNEL: 64
@@ -87,14 +86,14 @@ MODEL:
 
 
 OPTIMIZATION:
-    BATCH_SIZE_PER_GPU: 12
-    WORKERS: 24
-    NUM_EPOCHS: 30
+    BATCH_SIZE_PER_GPU: 8
+    WORKERS: 16
+    NUM_EPOCHS: 40
     # Evaluate the model every N epochs during training (0 disables)
     EVAL_EVERY_N_EPOCHS: 1
 
-    USE_AMP: True
-    LOSS_SCALE_FP16: 32.0
+    # USE_AMP: True
+    # LOSS_SCALE_FP16: 32.0
 
     OPTIMIZER: adamw_onecycle
     LR: 0.0002             # Keep base near the head max LR
@@ -114,18 +113,4 @@ OPTIMIZATION:
 
     GRAD_NORM_CLIP: 10
 
-    # Full fine-tune: unfreeze all; turn BN stats back on (optional)
     BN_EVAL_DURING_TRAIN: false
-
-    FREEZE_MODULES: []
-
-    PARAM_GROUPS:
-        - name: head
-          select: ['dense_head']
-          max_lr: 0.0002
-        - name: backbone_last
-          select: ['backbone_2d.blocks[2]','backbone_2d.deblocks[2]']
-          max_lr: 0.0001
-        - name: rest
-          select: ['rest']
-          max_lr: 0.00005

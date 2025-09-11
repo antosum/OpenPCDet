@@ -327,17 +327,45 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                         # Run evaluation
                         tb_dict = eval_utils.eval_one_epoch(
                             cfg, args, eval_model, eval_loader, trained_epoch, logger if logger is not None else common_utils.create_logger(None),
-                            dist_test=dist_test, result_dir=cur_result_dir
+                            dist_test=dist_test, result_dir=cur_result_dir,
+                            wandb_run=wandb_run, wandb_phase='valid', wandb_step_base=accumulated_iter,
+                            wandb_log_per_batch=False
                         )
 
                         # Log summarized eval metrics to tb and wandb (rank 0 only)
                         if rank == 0:
+                            # TensorBoard: only log numeric scalars; skip lists/arrays
                             if tb_log is not None:
-                                for key, val in tb_dict.items():
-                                    tb_log.add_scalar(key, val, trained_epoch)
+                                try:
+                                    for key, val in tb_dict.items():
+                                        try:
+                                            # Accept Python numbers or values that can be cast to float
+                                            if isinstance(val, (int, float)):
+                                                tb_log.add_scalar(key, val, trained_epoch)
+                                            else:
+                                                _v = float(val)  # may raise
+                                                tb_log.add_scalar(key, _v, trained_epoch)
+                                        except Exception:
+                                            # Skip non-scalars (e.g., PR curves)
+                                            continue
+                                except Exception:
+                                    # Never let TB failures block W&B logging
+                                    pass
+                            # W&B: log all numeric scalars under valid/ prefix at the last train step
                             if wandb_run is not None:
                                 try:
-                                    wandb_run.log({f'valid/{k}': v for k, v in tb_dict.items()}, step=accumulated_iter)
+                                    log_dict = {}
+                                    for k, v in tb_dict.items():
+                                        try:
+                                            if isinstance(v, (int, float)):
+                                                log_dict[f'valid/{k}'] = v
+                                            else:
+                                                log_dict[f'valid/{k}'] = float(v)
+                                        except Exception:
+                                            # Skip non-numeric types
+                                            continue
+                                    if log_dict:
+                                        wandb_run.log(log_dict, step=accumulated_iter)
                                 except Exception:
                                     pass
 

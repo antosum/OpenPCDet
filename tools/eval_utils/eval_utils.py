@@ -19,7 +19,9 @@ def statistics_info(cfg, ret_dict, metric, disp_dict):
         '(%d, %d) / %d' % (metric['recall_roi_%s' % str(min_thresh)], metric['recall_rcnn_%s' % str(min_thresh)], metric['gt_num'])
 
 
-def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=False, result_dir=None):
+def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=False, result_dir=None,
+                   wandb_run=None, wandb_phase: str = 'valid', wandb_step_base: int = None,
+                   wandb_log_per_batch: bool = False):
     result_dir.mkdir(parents=True, exist_ok=True)
 
     final_output_dir = result_dir / 'final_result' / 'data'
@@ -99,6 +101,36 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
         if cfg.LOCAL_RANK == 0:
             progress_bar.set_postfix(disp_dict)
             progress_bar.update()
+
+        # Optional: per-batch WANDB logging (disabled by default). When enabled, it logs
+        # at the provided constant step base to avoid advancing global step.
+        if wandb_log_per_batch and cfg.LOCAL_RANK == 0 and wandb_run is not None:
+            try:
+                # Keep step constant (the last train step) for overlay; do not advance it.
+                log_step = int(wandb_step_base) if isinstance(wandb_step_base, int) else None
+                # Build a compact per-batch metrics dict
+                wb = {}
+                prefix = (wandb_phase + '/') if isinstance(wandb_phase, str) and len(wandb_phase) > 0 else ''
+                wb[prefix + 'batch_idx'] = int(i)
+                wb[prefix + 'throughput/points_per_sec_batch'] = float(pts_per_sec_cur)
+                wb[prefix + 'throughput/points_per_sec_avg'] = float(pts_per_sec_avg)
+                # Running recalls for each threshold if we have seen GTs
+                gt_seen = int(metric.get('gt_num', 0))
+                if gt_seen > 0:
+                    for cur_thresh in cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST:
+                        roi_key = f'recall_roi_{cur_thresh}'
+                        rcnn_key = f'recall_rcnn_{cur_thresh}'
+                        roi_val = float(metric.get(roi_key, 0)) / float(gt_seen)
+                        rcnn_val = float(metric.get(rcnn_key, 0)) / float(gt_seen)
+                        wb[prefix + f'running_recall/roi_{cur_thresh}'] = roi_val
+                        wb[prefix + f'running_recall/rcnn_{cur_thresh}'] = rcnn_val
+                # Log with constant step (if provided) to avoid stepping forward
+                if log_step is None:
+                    wandb_run.log(wb)
+                else:
+                    wandb_run.log(wb, step=log_step)
+            except Exception:
+                pass
 
     if cfg.LOCAL_RANK == 0:
         progress_bar.close()

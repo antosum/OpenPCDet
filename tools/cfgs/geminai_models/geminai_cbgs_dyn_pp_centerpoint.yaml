@@ -7,7 +7,7 @@ WANDB:
     USE: True
     PROJECT: geminaiV0
     BEST_KEY: simple_bev/mAP@0.5
-    SAVE_ARTIFACTS: True
+    SAVE_ARTIFACTS: False
     TAGS: ["finetune:base", "n_head:1"]
 
 TRAIN:
@@ -96,14 +96,14 @@ OPTIMIZATION:
     # LOSS_SCALE_FP16: 32.0
 
     OPTIMIZER: adamw_onecycle
-    LR: 0.0002             # Keep base near the head max LR
+    LR: 0.0001             # Keep base near the head max LR
     WEIGHT_DECAY: 0.01
     MOMENTUM: 0.9
 
     MOMS: [0.95, 0.85]
     PCT_START: 0.4
     DIV_FACTOR: 10
-    FINAL_DIV_FACTOR: 1000
+    FINAL_DIV_FACTOR: 10_000
     DECAY_STEP_LIST: [35, 45]
     LR_DECAY: 0.1
     LR_CLIP: 1e-7

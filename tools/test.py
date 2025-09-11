@@ -60,7 +60,8 @@ def parse_config():
     return args, cfg
 
 
-def eval_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id, dist_test=False):
+def eval_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id, dist_test=False,
+                     wandb_run=None, wandb_phase: str = 'valid'):
     # load checkpoint
     model.load_params_from_file(filename=args.ckpt, logger=logger, to_cpu=dist_test, 
                                 pre_trained_path=args.pretrained_model)
@@ -69,7 +70,7 @@ def eval_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id
     # start evaluation
     eval_utils.eval_one_epoch(
         cfg, args, model, test_loader, epoch_id, logger, dist_test=dist_test,
-        result_dir=eval_output_dir
+        result_dir=eval_output_dir, wandb_run=wandb_run, wandb_phase=wandb_phase
     )
 
 
@@ -132,27 +133,30 @@ def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir
         cur_result_dir = eval_output_dir / ('epoch_%s' % cur_epoch_id) / cfg.DATA_CONFIG.DATA_SPLIT['test']
         tb_dict = eval_utils.eval_one_epoch(
             cfg, args, model, test_loader, cur_epoch_id, logger, dist_test=dist_test,
-            result_dir=cur_result_dir
+            result_dir=cur_result_dir, wandb_run=wandb_run, wandb_phase=(wandb_phase or 'valid'),
+            wandb_log_per_batch=False
         )
 
         if cfg.LOCAL_RANK == 0:
             for key, val in tb_dict.items():
                 tb_log.add_scalar(key, val, cur_epoch_id)
             if wandb_run is not None:
-                # Use the checkpoint's global iteration as the WandB step to keep it monotonic
-                ckpt_it = None
-                try:
-                    ckpt_data = torch.load(cur_ckpt, map_location='cpu')
-                    ckpt_it = int(ckpt_data.get('it', 0))
-                except Exception:
-                    ckpt_it = None
-                step_to_log = (ckpt_it + 1) if ckpt_it is not None else int(float(cur_epoch_id))
                 # Optionally namespace metrics under a phase (e.g., 'valid' or 'test')
                 if isinstance(wandb_phase, str) and len(wandb_phase) > 0:
                     prefixed = {f"{wandb_phase}/{k}": v for k, v in tb_dict.items()}
                 else:
                     prefixed = tb_dict
-                wandb_run.log(prefixed, step=step_to_log)
+                # Log at checkpoint's training step if available to overlay with train
+                try:
+                    ckpt_data = torch.load(cur_ckpt, map_location='cpu')
+                    ckpt_it = int(ckpt_data.get('it', 0))
+                except Exception:
+                    ckpt_it = None
+                if ckpt_it is not None:
+                    wandb_run.log(prefixed, step=int(ckpt_it))
+                else:
+                    # Fall back to epoch as step when 'it' is missing; overlay may be imperfect
+                    wandb_run.log(prefixed, step=int(float(cur_epoch_id)))
                 if best_key is not None and best_key in tb_dict:
                     cur_metric = tb_dict[best_key]
                     if cur_metric > best_metric:

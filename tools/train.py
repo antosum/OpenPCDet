@@ -235,6 +235,8 @@ def main():
             set_quick_dashboard_keys(wandb_run)
             log_run_basics(wandb_run, cfg, train_set, per_gpu_batch_size=args.batch_size, total_gpus=total_gpus)
 
+            # Use the training global step for validation overlays; no separate step metric.
+
     model = build_network(model_cfg=cfg.MODEL, num_class=len(cfg.CLASS_NAMES), dataset=train_set)
     if args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)

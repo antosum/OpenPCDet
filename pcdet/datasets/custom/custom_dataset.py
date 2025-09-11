@@ -551,16 +551,15 @@ class CustomDataset(DatasetTemplate):
                     scores_all = np.array(all_detections[c]['scores'])
                     matches_all = np.array(all_detections[c]['matches'])
 
-                    # 1) Stricter overlap metrics - AP@0.7 DISABLED for performance
-                    # if det_boxes_all.size > 0 and gt_boxes_all.size > 0:
-                    #     ious_07 = _compute_iou_matrix(det_boxes_all, gt_boxes_all, use_bev)
-                    #     det_used_07, gt_used_07 = _match_detections_to_gt(ious_07, 0.7)
-                    #     matches_07 = det_used_07.astype(float)
-                    #     ap_07 = _compute_ap_from_scores_matches(scores_all, matches_07, gt_boxes_all.shape[0])
-                    # else:
-                    #     ap_07 = 0.0
-                    # flat_result[f"{prefix}/AP@0.7"] = float(ap_07)
-                    ap_07 = 0.0  # Placeholder for disabled metric
+                    # 1) Stricter overlap metrics - AP@0.7 (enabled, lightweight)
+                    if det_boxes_all.size > 0 and gt_boxes_all.size > 0:
+                        ious_07 = _compute_iou_matrix(det_boxes_all, gt_boxes_all, use_bev)
+                        det_used_07, gt_used_07 = _match_detections_to_gt(ious_07, 0.7)
+                        matches_07 = det_used_07.astype(float)
+                        ap_07 = _compute_ap_from_scores_matches(scores_all, matches_07, gt_boxes_all.shape[0])
+                    else:
+                        ap_07 = 0.0
+                    flat_result[f"{prefix}/AP@0.7"] = float(ap_07)
 
                     # COCO-style mAP@[0.5:0.95] - DISABLED for performance
                     # if det_boxes_all.size > 0 and gt_boxes_all.size > 0:
@@ -659,10 +658,9 @@ class CustomDataset(DatasetTemplate):
             # Advanced overall metrics
             if enable_advanced_metrics:
                 # Overall mAP@0.7 - DISABLED for performance
-                # ap_07_list = [flat_result.get(f"{prefix}/{c}/AP@0.7", 0.0) for c in eval_class_names]
-                # map_07 = float(np.mean(ap_07_list)) if ap_07_list else 0.0
-                # flat_result[f"{prefix}/mAP@0.7"] = map_07
-                map_07 = 0.0  # Placeholder for disabled metric
+                ap_07_list = [flat_result.get(f"{prefix}/{c}/AP@0.7", 0.0) for c in eval_class_names]
+                map_07 = float(np.mean(ap_07_list)) if ap_07_list else 0.0
+                flat_result[f"{prefix}/mAP@0.7"] = map_07
 
                 # Overall COCO mAP@[0.5:0.95] - DISABLED for performance
                 # coco_map_list = [flat_result.get(f"{prefix}/{c}/mAP@[0.5:0.95]", 0.0) for c in eval_class_names]

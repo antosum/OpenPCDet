@@ -266,6 +266,12 @@ def main():
     if args.ckpt is not None:
         it, start_epoch = model.load_params_with_optimizer(args.ckpt, to_cpu=dist_train, optimizer=optimizer, logger=logger)
         last_epoch = start_epoch + 1
+        # Try to restore AMP scaler if present and in use
+        try:
+            ckpt = torch.load(args.ckpt, map_location='cpu')
+            amp_scaler_state = ckpt.get('amp_scaler')
+        except Exception:
+            amp_scaler_state = None
     else:
         auto_resume = cfg.get('TRAIN', {}).get('AUTO_RESUME', True)
         if auto_resume:
@@ -278,6 +284,11 @@ def main():
                             ckpt_list[-1], to_cpu=dist_train, optimizer=optimizer, logger=logger
                         )
                         last_epoch = start_epoch + 1
+                        try:
+                            ckpt = torch.load(ckpt_list[-1], map_location='cpu')
+                            amp_scaler_state = ckpt.get('amp_scaler')
+                        except Exception:
+                            amp_scaler_state = None
                         # If the checkpoint already completed all target epochs, skip resuming
                         if start_epoch >= args.epochs:
                             logger.info(f"Found checkpoint at epoch {start_epoch} >= target epochs {args.epochs}. Starting a fresh run without resuming.")
@@ -341,6 +352,13 @@ def main():
         optimizer, total_iters_each_epoch=len(train_loader), total_epochs=args.epochs,
         last_epoch=last_epoch, optim_cfg=cfg.OPTIMIZATION
     )
+
+    # Pass scaler state via cfg for train loop to restore, if present
+    try:
+        if 'amp_scaler_state' not in cfg.OPTIMIZATION:
+            cfg.OPTIMIZATION['amp_scaler_state'] = amp_scaler_state if 'amp_scaler_state' in locals() else None
+    except Exception:
+        pass
 
     # -----------------------start training---------------------------
     logger.info('**********************Start training %s/%s(%s)**********************'

@@ -3,15 +3,25 @@ CLASS_NAMES: ['Belt_loader','High_loader','Other_vehicle']
 DATA_CONFIG:
     _BASE_CONFIG_: cfgs/dataset_configs/geminai_dataset.yaml
 
-WANDB:
-    USE: True
-    PROJECT: geminaiV0
-    BEST_KEY: simple_bev/mAP@0.5
-    SAVE_ARTIFACTS: False
-    TAGS: ["finetune:base", "n_head:1"]
+    POINT_CLOUD_RANGE: [32.914, -48.847, 0.0, 119.314, 47.153, 8.0]
 
-TRAIN:
-    AUTO_RESUME: False
+    DATA_PROCESSOR:
+        -   NAME: mask_points_and_boxes_outside_range
+            REMOVE_OUTSIDE_BOXES: True
+
+        -   NAME: shuffle_points
+            SHUFFLE_ENABLED: {
+                'train': True,
+                'test': True
+            }
+
+        -   NAME: transform_points_to_voxels
+            VOXEL_SIZE: [0.2, 0.2, 8.0]
+            MAX_POINTS_PER_VOXEL: 20
+            MAX_NUMBER_OF_VOXELS: {
+                'train': 30_000,
+                'test': 30_000
+            }
 
 PRETRAINED_MODEL: /home/antonin-sumner/data/openpcdet_data/ckpt/cbgs_pp_centerpoint_nds6070_nuscene.pth
 
@@ -19,11 +29,11 @@ MODEL:
     NAME: CenterPoint
 
     VFE:
-        NAME: DynPillarVFE
+        NAME: PillarVFE
         WITH_DISTANCE: False
         USE_ABSLOTE_XYZ: True
         USE_NORM: True
-        NUM_FILTERS: [ 64, 64 ]
+        NUM_FILTERS: [64]
 
     MAP_TO_BEV:
         NAME: PointPillarScatter
@@ -92,15 +102,6 @@ OPTIMIZATION:
     # Evaluate the model every N epochs during training (0 disables)
     EVAL_EVERY_N_EPOCHS: 1
 
-    AMP:
-        ENABLED: true
-        DTYPE: bf16      # RTX 4070 supports BF16; no GradScaler used
-        # Scaler knobs below are ignored for bf16
-        # INIT_SCALE: 16384.0
-        # GROWTH_FACTOR: 2.0
-        # BACKOFF_FACTOR: 0.5
-        # GROWTH_INTERVAL: 2000
-
     OPTIMIZER: adamw_onecycle
     LR: 0.0005             # Keep base near the head max LR
     WEIGHT_DECAY: 0.01
@@ -120,3 +121,22 @@ OPTIMIZATION:
     GRAD_NORM_CLIP: 10
 
     BN_EVAL_DURING_TRAIN: false
+
+    AMP:
+        ENABLED: True
+        DTYPE: bf16      # RTX 4070 supports BF16; no GradScaler used
+        # Scaler knobs below are ignored for bf16
+        # INIT_SCALE: 16384.0
+        # GROWTH_FACTOR: 2.0
+        # BACKOFF_FACTOR: 0.5
+        # GROWTH_INTERVAL: 2000
+
+WANDB:
+    USE: True
+    PROJECT: geminaiV0
+    BEST_KEY: simple_bev/mAP@0.5
+    SAVE_ARTIFACTS: True
+    TAGS: ["finetune:base", "n_head:1", "fixed_vfe"]
+
+TRAIN:
+    AUTO_RESUME: False

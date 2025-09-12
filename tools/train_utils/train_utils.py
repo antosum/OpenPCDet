@@ -37,7 +37,28 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
     ckpt_save_cnt = 1
     start_it = accumulated_iter % total_it_each_epoch
 
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp, init_scale=optim_cfg.get('LOSS_SCALE_FP16', 2.0**16))
+    # Unified AMP settings from config
+    amp_cfg = optim_cfg.get('AMP', {}) if hasattr(optim_cfg, 'get') else {}
+    amp_enabled = bool(amp_cfg.get('ENABLED', use_amp))
+    amp_dtype_str = str(amp_cfg.get('DTYPE', 'fp16')).lower()
+    amp_dtype = torch.float16 if amp_dtype_str in ('fp16', 'float16', 'half') else torch.bfloat16
+    # GradScaler only for fp16 path per PyTorch guidance
+    scaler = None
+    if amp_enabled and amp_dtype is torch.float16:
+        scaler = torch.amp.GradScaler(
+            'cuda',
+            init_scale=float(amp_cfg.get('INIT_SCALE', 2.0 ** 16)),
+            growth_factor=float(amp_cfg.get('GROWTH_FACTOR', 2.0)),
+            backoff_factor=float(amp_cfg.get('BACKOFF_FACTOR', 0.5)),
+            growth_interval=int(amp_cfg.get('GROWTH_INTERVAL', 2000)),
+        )
+        # Attempt to restore scaler state passed via optim_cfg
+        try:
+            prev_state = optim_cfg.get('amp_scaler_state', None) if hasattr(optim_cfg, 'get') else None
+            if prev_state:
+                scaler.load_state_dict(prev_state)
+        except Exception:
+            pass
     
     if rank == 0:
         pbar = tqdm.tqdm(total=total_it_each_epoch, leave=leave_pbar, desc='train', dynamic_ncols=True)
@@ -72,17 +93,43 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         # Re-freeze BN stats each iteration if requested
         if optim_cfg.get('BN_EVAL_DURING_TRAIN', False):
             set_bn_eval(model, freeze_affine=optim_cfg.get('BN_FREEZE_AFFINE', False))
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.autocast(device_type='cuda', dtype=amp_dtype, enabled=amp_enabled):
             loss, tb_dict, disp_dict = model_func(model, batch)
+        # Promote loss to float32 to improve numerical stability under AMP
+        try:
+            loss = loss.float()
+        except Exception:
+            pass
 
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        # Compute total gradient norm (pre-clipping) and apply clipping
-        grad_norm = clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
-        scaler.step(optimizer)
-        scaler.update()
+        # NaN/Inf guard: skip this iteration if loss is not finite
+        if not torch.isfinite(loss):
+            if logger is not None and use_logger_to_record:
+                logger.warning(f"Non-finite loss detected at iter {accumulated_iter}; skipping optimizer step.")
+            if tb_log is not None:
+                try:
+                    tb_log.add_scalar('train/non_finite_loss_iter', accumulated_iter, accumulated_iter)
+                except Exception:
+                    pass
+            # Clear grads and continue to next batch
+            optimizer.zero_grad(set_to_none=True)
+            # Do not step scheduler on invalid step to keep alignment
+            accumulated_iter += 1
+            continue
+
+        # Backward + step with correct AMP handling
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            # Unscale before clipping per AMP recipe
+            scaler.unscale_(optimizer)
+            grad_norm = clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            grad_norm = clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
+            optimizer.step()
 
         # Advance LR scheduler after optimizer step to follow PyTorch guidance
         lr_scheduler.step(accumulated_iter, cur_epoch)
@@ -220,9 +267,14 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
             time_past_this_epoch = pbar.format_dict['elapsed']
             if time_past_this_epoch // ckpt_save_time_interval >= ckpt_save_cnt:
                 ckpt_name = ckpt_save_dir / 'latest_model'
-                save_checkpoint(
-                    checkpoint_state(model, optimizer, cur_epoch, accumulated_iter), filename=ckpt_name,
-                )
+                state = checkpoint_state(model, optimizer, cur_epoch, accumulated_iter)
+                # Attach AMP scaler state for fp16 if present
+                try:
+                    if scaler is not None:
+                        state['amp_scaler'] = scaler.state_dict()
+                except Exception:
+                    pass
+                save_checkpoint(state, filename=ckpt_name)
                 logger.info(f'Save latest model to {ckpt_name}')
                 ckpt_save_cnt += 1
                 
@@ -307,9 +359,13 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                         os.remove(ckpt_list[cur_file_idx])
 
                 ckpt_name = ckpt_save_dir / ('checkpoint_epoch_%d' % trained_epoch)
-                save_checkpoint(
-                    checkpoint_state(model, optimizer, trained_epoch, accumulated_iter), filename=ckpt_name,
-                )
+                state = checkpoint_state(model, optimizer, trained_epoch, accumulated_iter)
+                try:
+                    if 'scaler' in locals() and scaler is not None:
+                        state['amp_scaler'] = scaler.state_dict()
+                except Exception:
+                    pass
+                save_checkpoint(state, filename=ckpt_name)
 
             # Evaluate during training at the requested frequency
             if eval_every_n_epochs and eval_loader is not None and eval_output_dir is not None:

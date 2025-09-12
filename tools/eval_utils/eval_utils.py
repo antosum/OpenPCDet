@@ -66,7 +66,9 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
         # measure forward time for throughput regardless of args.infer_time
         _t0 = time.time()
         with torch.no_grad():
-            pred_dicts, ret_dict = model(batch_dict)
+            # Force eval to run in FP32 to avoid custom CUDA kernels seeing bf16/fp16 tensors
+            with torch.autocast(device_type='cuda', enabled=False):
+                pred_dicts, ret_dict = model(batch_dict)
         inference_time = time.time() - _t0
 
         disp_dict = {}

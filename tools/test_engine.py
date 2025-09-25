@@ -17,7 +17,7 @@ eng = PCDetEngine(
     ckpt_path="~/projects/OpenPCDet/output/geminai_models/geminai_cbgs_dyn_pp_centerpoint/vital-cosmos-46/ckpt/best_model.pth",
     device="cuda",
     use_autocast=True,
-    autocast_dtype="bf16",  # or "fp16"
+    autocast_dtype="bf16"
 )
 
 print("Engine initialized")

@@ -1,8 +1,8 @@
-"""Inference engine wrapper for OpenPCDet models.
+"""Lean LiDAR inference engine for OpenPCDet models.
 
-This module exposes :class:`PCDetEngine`, a lightweight helper designed for
-single-frame LiDAR inference pipelines. It focuses on PointPillars and
-CenterPoint-style models but keeps the setup generic enough to extend further.
+The :class:`PCDetEngine` helper targets point-cloud only, single-frame pipelines
+for PointPillars and CenterPoint style detectors. Camera/BEV image branches are
+intentionally omitted to minimise overhead for live deployments.
 """
 
 from __future__ import annotations
@@ -21,11 +21,6 @@ from easydict import EasyDict
 from pcdet.config import cfg_from_yaml_file
 from pcdet.datasets.dataset import DatasetTemplate
 from pcdet.models import build_network
-
-try:  # pragma: no cover - optional dependency
-    import kornia
-except Exception:  # pragma: no cover - optional dependency
-    kornia = None
 
 
 class PCDetEngine:
@@ -351,10 +346,8 @@ class PCDetEngine:
         if points_np.ndim != 2:
             raise ValueError(f"points must be a 2D array, got shape {points_np.shape}")
 
-        if not np.issubdtype(points_np.dtype, np.floating):
-            points_np = points_np.astype(np.float32, copy=False)
-        else:
-            points_np = points_np.astype(np.float32, copy=False)
+        points_np = points_np.astype(np.float32, copy=False)
+        points_np = np.ascontiguousarray(points_np)
 
         expected_feats = int(getattr(self.dataset.point_feature_encoder, "num_point_features", points_np.shape[1]))
         pad_info = None
@@ -372,7 +365,7 @@ class PCDetEngine:
 
     def _load_to_device(self, batch_dict: Dict[str, Any]) -> None:
         for key, val in list(batch_dict.items()):
-            if key in {"frame_id", "metadata", "calib", "image_paths", "ori_shape", "img_process_infos"}:
+            if key in {"frame_id", "metadata", "calib"}:
                 continue
 
             if isinstance(val, torch.Tensor):
@@ -380,24 +373,6 @@ class PCDetEngine:
                 continue
 
             if not isinstance(val, np.ndarray):
-                continue
-
-            if key == "images":
-                if kornia is None:
-                    raise ImportError("kornia is required to move image tensors to device")
-                batch_dict[key] = (
-                    kornia.image_to_tensor(val).float().to(self.device, non_blocking=True).contiguous()
-                )
-                continue
-
-            if key == "camera_imgs":
-                tensor = torch.stack([torch.stack(imgs, dim=0) for imgs in val], dim=0)
-                batch_dict[key] = tensor.to(self.device, non_blocking=True)
-                continue
-
-            if key == "image_shape":
-                tensor = torch.from_numpy(val).int()
-                batch_dict[key] = tensor.to(self.device, non_blocking=True)
                 continue
 
             tensor = torch.from_numpy(val)

@@ -3,3 +3,9 @@ Predict latency (ms) over 500 runs: mean=17.82, min=12.33, max=40.16, p95=21.83
 
 phase 1:
 Predict latency (ms) over 500 runs: mean=16.83, min=12.39, max=26.86, p95=21.27
+
+phase 2 (reverted):
+Predict latency (ms) over 493 runs: mean=18.11, min=12.68, max=547.01, p95=21.44
+
+phase 3:
+Predict latency (ms) over 493 runs: mean=13.77, min=9.35, max=24.40, p95=18.02

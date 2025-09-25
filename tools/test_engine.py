@@ -16,6 +16,8 @@ eng = PCDetEngine(
     cfg_file="~/projects/OpenPCDet/tools/cfgs/geminai_models/geminai_cbgs_dyn_pp_centerpoint.yaml",
     ckpt_path="~/projects/OpenPCDet/output/geminai_models/geminai_cbgs_dyn_pp_centerpoint/vital-cosmos-46/ckpt/best_model.pth",
     device="cuda",
+    use_autocast=True,
+    autocast_dtype="bf16",  # or "fp16"
 )
 
 print("Engine initialized")
@@ -106,7 +108,7 @@ def _log_frame_to_rerun(frame_idx: int, points: np.ndarray, prediction: dict) ->
 
 # Timed runs
 for i, fn in enumerate(pth.glob("*.npy")):
-    if i >= 500:
+    if i >= 493:
         break
     print(fn)
     x = np.load(fn)

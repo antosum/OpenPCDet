@@ -7,6 +7,7 @@ CenterPoint-style models but keeps the setup generic enough to extend further.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import logging
 from pathlib import Path
@@ -39,6 +40,8 @@ class PCDetEngine:
         matmul_precision: str = "high",
         cudnn_benchmark: bool = True,
         deterministic: bool = False,
+        use_autocast: bool = False,
+        autocast_dtype: str = "bf16",
     ) -> None:
         self.logger = logging.getLogger("pcdet_engine")
         if not self.logger.handlers:
@@ -61,6 +64,8 @@ class PCDetEngine:
         self.matmul_precision = matmul_precision
         self.cudnn_benchmark = cudnn_benchmark
         self.deterministic = deterministic
+        self.use_autocast = bool(use_autocast)
+        self.autocast_dtype = autocast_dtype
 
         self.cfg: Optional[EasyDict] = None
         self.model_cfg: Optional[EasyDict] = None
@@ -253,7 +258,16 @@ class PCDetEngine:
         self._load_to_device(batch_dict)
 
         # Use inference_mode to avoid autograd overhead during inference
-        with torch.inference_mode():
+        autocast_ctx = (
+            torch.autocast(
+                device_type=self.device.type,
+                dtype=self._resolve_autocast_dtype(),
+            )
+            if self._should_autocast()
+            else contextlib.nullcontext()
+        )
+
+        with torch.inference_mode(), autocast_ctx:
             pred_dicts, _ = self.model(batch_dict)
 
         if not pred_dicts:
@@ -281,10 +295,15 @@ class PCDetEngine:
             scores = scores[mask]
             labels = labels[mask]
 
+        # Ensure NumPy-compatible dtypes even under autocast (e.g., bf16)
+        boxes_cpu = boxes.detach().cpu().to(torch.float32)
+        scores_cpu = scores.detach().cpu().to(torch.float32)
+        labels_cpu = labels.detach().cpu().to(torch.int32)
+
         result = {
-            "boxes_lidar": boxes.detach().cpu().numpy(),
-            "scores": scores.detach().cpu().numpy(),
-            "labels": labels.detach().cpu().numpy().astype(np.int32),
+            "boxes_lidar": boxes_cpu.numpy(),
+            "scores": scores_cpu.numpy(),
+            "labels": labels_cpu.numpy(),
         }
 
         if pad_info:
@@ -358,3 +377,14 @@ class PCDetEngine:
             tensor = torch.from_numpy(val)
             tensor = tensor.float() if tensor.is_floating_point() else tensor.int()
             batch_dict[key] = tensor.to(self.device, non_blocking=True)
+
+    def _should_autocast(self) -> bool:
+        return self.use_autocast and self.device.type == "cuda"
+
+    def _resolve_autocast_dtype(self) -> torch.dtype:
+        dtype_key = self.autocast_dtype.lower()
+        if dtype_key in {"bf16", "bfloat16"}:
+            return torch.bfloat16
+        if dtype_key in {"fp16", "float16", "half"}:
+            return torch.float16
+        raise ValueError(f"Unsupported autocast dtype: {self.autocast_dtype}")

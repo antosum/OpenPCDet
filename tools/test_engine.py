@@ -106,7 +106,7 @@ def _log_frame_to_rerun(frame_idx: int, points: np.ndarray, prediction: dict) ->
 
 # Timed runs
 for i, fn in enumerate(pth.glob("*.npy")):
-    if i >= 100:
+    if i >= 500:
         break
     print(fn)
     x = np.load(fn)

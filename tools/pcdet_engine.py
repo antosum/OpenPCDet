@@ -29,7 +29,17 @@ except Exception:  # pragma: no cover - optional dependency
 class PCDetEngine:
     """Inference helper to run OpenPCDet models on individual LiDAR frames."""
 
-    def __init__(self, cfg_file: str, ckpt_path: str, device: str = "cuda") -> None:
+    def __init__(
+        self,
+        cfg_file: str,
+        ckpt_path: str,
+        device: str = "cuda",
+        *,
+        enable_tf32: bool = True,
+        matmul_precision: str = "high",
+        cudnn_benchmark: bool = True,
+        deterministic: bool = False,
+    ) -> None:
         self.logger = logging.getLogger("pcdet_engine")
         if not self.logger.handlers:
             handler = logging.StreamHandler()
@@ -46,6 +56,12 @@ class PCDetEngine:
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("Requested CUDA device but torch.cuda.is_available() is False")
 
+        # Backend/runtime preferences (Phase 1: safe toggles)
+        self.enable_tf32 = enable_tf32
+        self.matmul_precision = matmul_precision
+        self.cudnn_benchmark = cudnn_benchmark
+        self.deterministic = deterministic
+
         self.cfg: Optional[EasyDict] = None
         self.model_cfg: Optional[EasyDict] = None
         self.dataset = None
@@ -55,12 +71,43 @@ class PCDetEngine:
         self._load_cfg()
         self.logger.info("Configuration loaded successfully")
 
+        # Configure PyTorch backends for inference throughput
+        self._configure_backends()
+
         self._build_dataset()
         self.logger.info("Dataset instantiated for live inference (mode=%s)", self.dataset.mode)
 
         self._build_model()
         self.logger.info("Model ready: %s", self.model.__class__.__name__)
         self._frame_idx = 0
+
+    def _configure_backends(self) -> None:
+        """Apply safe, opt-in backend settings for inference throughput."""
+        if self.device.type == "cuda":
+            try:
+                # TF32 can significantly speed up matmul/conv on Ampere+ with minimal accuracy loss
+                torch.backends.cuda.matmul.allow_tf32 = bool(self.enable_tf32)
+                torch.backends.cudnn.allow_tf32 = bool(self.enable_tf32)
+            except Exception:
+                pass
+
+            try:
+                # cuDNN autotuner is useful for fixed input shapes common in BEV backbones
+                torch.backends.cudnn.benchmark = bool(self.cudnn_benchmark)
+            except Exception:
+                pass
+
+        try:
+            # Prefer high-performance FP32 matmul kernels
+            torch.set_float32_matmul_precision(str(self.matmul_precision))
+        except Exception:
+            pass
+
+        try:
+            # Favor throughput unless strict determinism is required
+            torch.use_deterministic_algorithms(bool(self.deterministic))
+        except Exception:
+            pass
 
     def _load_cfg(self) -> None:
         """Load the YAML config and strip training-only augmentations."""
@@ -205,7 +252,8 @@ class PCDetEngine:
         batch_dict = self.dataset.collate_batch([data_dict])
         self._load_to_device(batch_dict)
 
-        with torch.no_grad():
+        # Use inference_mode to avoid autograd overhead during inference
+        with torch.inference_mode():
             pred_dicts, _ = self.model(batch_dict)
 
         if not pred_dicts:
@@ -283,7 +331,7 @@ class PCDetEngine:
                 continue
 
             if isinstance(val, torch.Tensor):
-                batch_dict[key] = val.to(self.device)
+                batch_dict[key] = val.to(self.device, non_blocking=True)
                 continue
 
             if not isinstance(val, np.ndarray):
@@ -292,19 +340,21 @@ class PCDetEngine:
             if key == "images":
                 if kornia is None:
                     raise ImportError("kornia is required to move image tensors to device")
-                batch_dict[key] = kornia.image_to_tensor(val).float().to(self.device).contiguous()
+                batch_dict[key] = (
+                    kornia.image_to_tensor(val).float().to(self.device, non_blocking=True).contiguous()
+                )
                 continue
 
             if key == "camera_imgs":
                 tensor = torch.stack([torch.stack(imgs, dim=0) for imgs in val], dim=0)
-                batch_dict[key] = tensor.to(self.device)
+                batch_dict[key] = tensor.to(self.device, non_blocking=True)
                 continue
 
             if key == "image_shape":
                 tensor = torch.from_numpy(val).int()
-                batch_dict[key] = tensor.to(self.device)
+                batch_dict[key] = tensor.to(self.device, non_blocking=True)
                 continue
 
             tensor = torch.from_numpy(val)
             tensor = tensor.float() if tensor.is_floating_point() else tensor.int()
-            batch_dict[key] = tensor.to(self.device)
+            batch_dict[key] = tensor.to(self.device, non_blocking=True)

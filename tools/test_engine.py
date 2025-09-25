@@ -28,7 +28,7 @@ else:
     print("[yellow]Rerun not available; continuing without live viewer[/yellow]")
 
 # Warmup + profiling of predict
-num_warmup = 5
+num_warmup = 10
 times_ms = []
 
 

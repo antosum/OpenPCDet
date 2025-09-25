@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -42,6 +43,7 @@ class PCDetEngine:
         deterministic: bool = False,
         use_autocast: bool = False,
         autocast_dtype: str = "bf16",
+        configure_allocator: bool = True,
     ) -> None:
         self.logger = logging.getLogger("pcdet_engine")
         if not self.logger.handlers:
@@ -66,6 +68,7 @@ class PCDetEngine:
         self.deterministic = deterministic
         self.use_autocast = bool(use_autocast)
         self.autocast_dtype = autocast_dtype
+        self.configure_allocator = bool(configure_allocator)
 
         self.cfg: Optional[EasyDict] = None
         self.model_cfg: Optional[EasyDict] = None
@@ -78,6 +81,9 @@ class PCDetEngine:
 
         # Configure PyTorch backends for inference throughput
         self._configure_backends()
+
+        # Apply runtime environment tweaks (allocator, launch blocking warnings)
+        self._configure_runtime_environment()
 
         self._build_dataset()
         self.logger.info("Dataset instantiated for live inference (mode=%s)", self.dataset.mode)
@@ -113,6 +119,26 @@ class PCDetEngine:
             torch.use_deterministic_algorithms(bool(self.deterministic))
         except Exception:
             pass
+
+    def _configure_runtime_environment(self) -> None:
+        """Set allocator defaults and warn on blocking configs."""
+        if self.device.type == "cuda" and self.configure_allocator:
+            alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+            if not alloc_conf:
+                os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+                self.logger.info(
+                    "Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True for allocator stability"
+                )
+            elif "expandable_segments" not in alloc_conf:
+                self.logger.debug(
+                    "Allocator config already set (%s); leaving as-is", alloc_conf
+                )
+
+        launch_blocking = os.environ.get("CUDA_LAUNCH_BLOCKING")
+        if launch_blocking == "1":
+            self.logger.warning(
+                "CUDA_LAUNCH_BLOCKING=1 detected; async execution disabled and latency may increase"
+            )
 
     def _load_cfg(self) -> None:
         """Load the YAML config and strip training-only augmentations."""

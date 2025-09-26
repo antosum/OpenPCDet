@@ -138,3 +138,5 @@ if times_ms:
 # print("CFG\n",Pretty(eng.cfg))
 # print("Data_CONFIG\n",Pretty(eng.data_config))
 # print("Class names \n",Pretty(eng.class_names))
+
+print("Output:\n", type(y),"\n", Pretty(y))

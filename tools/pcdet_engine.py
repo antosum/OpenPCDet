@@ -243,16 +243,13 @@ class PCDetEngine:
 
     def predict(
         self,
-        points: Union[np.ndarray, torch.Tensor],
-        *,
-        score_thresh: Optional[float] = None,
+        points: Union[np.ndarray, torch.Tensor]
     ) -> Dict[str, Any]:
         """Run inference on a single LiDAR frame.
 
         Args:
             points: Array or tensor with shape ``(N, C)`` describing LiDAR points in
                 the order expected by the configured ``POINT_FEATURE_ENCODING``.
-            score_thresh: Optional score threshold applied after model post-processing.
 
         Returns:
             Dictionary containing ``boxes_lidar``, ``scores``, ``labels`` as NumPy arrays.
@@ -309,12 +306,6 @@ class PCDetEngine:
         boxes = boxes.to(self.device) if boxes.device != self.device else boxes
         scores = scores.to(self.device) if scores.device != self.device else scores
         labels = labels.to(self.device) if labels.device != self.device else labels
-
-        if score_thresh is not None:
-            mask = scores >= float(score_thresh)
-            boxes = boxes[mask]
-            scores = scores[mask]
-            labels = labels[mask]
 
         # Ensure NumPy-compatible dtypes even under autocast (e.g., bf16)
         boxes_cpu = boxes.detach().cpu().to(torch.float32)

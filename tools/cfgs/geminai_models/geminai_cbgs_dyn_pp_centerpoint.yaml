@@ -1,7 +1,7 @@
 CLASS_NAMES: ['Belt_loader','High_loader','Other_vehicle']
 
 DATA_CONFIG:
-    _BASE_CONFIG_: cfgs/dataset_configs/geminai_dataset.yaml
+    _BASE_CONFIG_: /home/antonin-sumner/projects/SG1/OpenPCDet/tools/cfgs/dataset_configs/geminai_dataset.yaml
 
 WANDB:
     USE: True
@@ -13,7 +13,7 @@ WANDB:
 TRAIN:
     AUTO_RESUME: False
 
-PRETRAINED_MODEL: /home/antonin-sumner/data/openpcdet_data/ckpt/cbgs_pp_centerpoint_nds6070_nuscene.pth
+PRETRAINED_MODEL: ~/data/openpcdet_data/ckpt/cbgs_pp_centerpoint_nds6070_nuscene.pth
 
 MODEL:
     NAME: CenterPoint

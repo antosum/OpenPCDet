@@ -30,6 +30,8 @@ else:
 # Warmup + profiling of predict
 num_warmup = 10
 times_ms = []
+# Track input point counts per frame for stats
+num_points = []
 
 
 def _yaw_to_quaternion(yaw: np.ndarray) -> np.ndarray:
@@ -112,6 +114,12 @@ for i, fn in enumerate(pth.glob("*.npy")):
         break
     print(fn)
     x = np.load(fn)
+    # Record number of points in this input frame for stats (assumes NxC array)
+    try:
+        npts = int(x.shape[0])
+    except Exception as e:  # Fail fast with context if unexpected input
+        raise RuntimeError(f"Expected numpy array with shape (N, C) from {fn}, got type={type(x)} and shape={getattr(x, 'shape', None)}") from e
+    num_points.append(npts)
     if i == 0:
         # Warmup runs (not timed)
         for _ in range(num_warmup):
@@ -133,6 +141,18 @@ if times_ms:
     print(
         f"Predict latency (ms) over {len(arr)} runs: "
         f"mean={mean_ms:.2f}, min={min_ms:.2f}, max={max_ms:.2f}, p95={p95_ms:.2f}"
+    )
+
+# Input point count statistics
+if num_points:
+    np_arr = np.asarray(num_points, dtype=np.int64)
+    mean_pts = float(np_arr.mean())
+    min_pts = int(np_arr.min())
+    max_pts = int(np_arr.max())
+    p95_pts = float(np.percentile(np_arr, 95))
+    print(
+        f"Input points per frame over {len(np_arr)} runs: "
+        f"mean={mean_pts:.1f}, min={min_pts}, max={max_pts}, p95={p95_pts:.1f}"
     )
 
 # print("CFG\n",Pretty(eng.cfg))

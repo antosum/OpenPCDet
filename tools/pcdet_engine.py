@@ -243,14 +243,13 @@ class PCDetEngine:
 
     def predict(
         self,
-        points: Union[np.ndarray, torch.Tensor]
+        points: Union[np.ndarray, torch.Tensor],
     ) -> Dict[str, Any]:
         """Run inference on a single LiDAR frame.
 
         Args:
             points: Array or tensor with shape ``(N, C)`` describing LiDAR points in
                 the order expected by the configured ``POINT_FEATURE_ENCODING``.
-
         Returns:
             Dictionary containing ``boxes_lidar``, ``scores``, ``labels`` as NumPy arrays.
         """
@@ -259,6 +258,22 @@ class PCDetEngine:
             raise RuntimeError("PCDetEngine is not fully initialized")
 
         points_np, pad_info = self._normalize_points(points)
+        roi_mask = self._compute_roi_mask(points_np)
+
+        if roi_mask.size != len(points_np):
+            raise RuntimeError(
+                "ROI mask length mismatch; ensure _compute_roi_mask returns per-point mask"
+            )
+
+        if not roi_mask.any():
+            empty_result = {
+                "boxes_lidar": np.empty((0, 7), dtype=np.float32),
+                "scores": np.empty((0,), dtype=np.float32),
+                "labels": np.empty((0,), dtype=np.int32),
+            }
+            return empty_result
+
+        points_np = points_np[roi_mask]
 
         frame_id = f"live_{self._frame_idx:06d}"
         self._frame_idx += 1
@@ -289,11 +304,12 @@ class PCDetEngine:
             pred_dicts, _ = self.model(batch_dict)
 
         if not pred_dicts:
-            return {
+            empty_result = {
                 "boxes_lidar": np.empty((0, 7), dtype=np.float32),
                 "scores": np.empty((0,), dtype=np.float32),
                 "labels": np.empty((0,), dtype=np.int32),
             }
+            return empty_result
 
         first = pred_dicts[0]
         boxes = first.get("pred_boxes")
@@ -340,6 +356,11 @@ class PCDetEngine:
         points_np = points_np.astype(np.float32, copy=False)
         points_np = np.ascontiguousarray(points_np)
 
+        if points_np.shape[1] < 3:
+            raise ValueError(
+                f"points must include at least XYZ columns; received shape {points_np.shape}"
+            )
+
         expected_feats = int(getattr(self.dataset.point_feature_encoder, "num_point_features", points_np.shape[1]))
         pad_info = None
 
@@ -353,6 +374,24 @@ class PCDetEngine:
             )
 
         return points_np, pad_info
+
+    def _compute_roi_mask(self, points_sensor: np.ndarray) -> np.ndarray:
+        dataset = getattr(self, "dataset", None)
+        point_cloud_range = None if dataset is None else getattr(dataset, "point_cloud_range", None)
+        if point_cloud_range is None or len(point_cloud_range) < 6:
+            raise RuntimeError("Detector dataset missing a valid point_cloud_range for ROI filtering")
+
+        min_x, min_y, min_z, max_x, max_y, max_z = point_cloud_range
+        mask = (
+            (points_sensor[:, 0] >= min_x)
+            & (points_sensor[:, 0] <= max_x)
+            & (points_sensor[:, 1] >= min_y)
+            & (points_sensor[:, 1] <= max_y)
+            & (points_sensor[:, 2] >= min_z)
+            & (points_sensor[:, 2] <= max_z)
+        )
+
+        return mask
 
     def _load_to_device(self, batch_dict: Dict[str, Any]) -> None:
         for key, val in list(batch_dict.items()):

@@ -337,7 +337,7 @@ class PCDetEngine:
         if pad_info:
             self.logger.debug("Applied feature padding: %s", pad_info)
 
-        return result
+        return result, roi_mask
 
     # ------------------------------------------------------------------
     # Helpers
